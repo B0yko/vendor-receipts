@@ -74,6 +74,13 @@ the agent's files. Holdout rows are touched only by `make holdout`, once, at the
 - `app/run.py` (L3): `python3 -m app.run --cases FILE --out FILE [--only id,...] [--concurrency N]
   [--wall-cap S]`; cases: JSONL `{"url", "id"?}`, CSV with a url column, or one URL per line; writes each Verdict
   line as it completes, then `<out>.csv` (Stackgini columns) and `runs/<run_id>/manifest.json`.
+- Model answer shapes that cross lanes (L3, L6 and L5's fake fixtures code against them):
+  - purpose `says_it` (L6): user text lists receipts `{id, claim, quote, source_title, url}`; answer
+    `{"results": [{"id": "e3", "supports": true, "why": "..."}]}`.
+  - purpose `judge` (L3): answer `{"overall": "Green|Yellow|Red", "reliability": "high|medium|low", "reliability_why",
+    "green_flags": [{"text", "category": 1-24, "severity", "basis": "confirmed|contradicted|not_confirmed",
+    "receipts": ["e3"]}], "yellow_flags": [...], "red_flags": [...], "reasoning" (every sentence cites [e3]),
+    "blind_spots": [], "buyer_next_step", "vendor_questions": [3 strings], "would_flip"}`.
 - `evalkit/` (L4): reads labels from `data/` and our run artifacts; `python3 -m evalkit.report`; the plain baseline
   `python3 -m evalkit.baseline` (homepage + the same search results, one call, no rule, no checks).
 
@@ -83,8 +90,9 @@ the agent's files. Holdout rows are touched only by `make holdout`, once, at the
 - L1 tool layer (worktree `build/vendor-receipts-l1`, branch `l1`): `app/research/tools.py`, `tests/test_l1_*.py`.
 - L2 research brain: identity, site read, plan, loop, claim check (worktree `build/vendor-receipts-l2`, branch `l2`):
   `app/research/agent.py`, `app/research/prompts.py`, `tests/test_l2_*.py`.
-- L3 receipt checks and judge (worktree `build/vendor-receipts-b`, branch `lane-b`): `app/check/` and `app/judge/`
-  (package inits excepted), `tests/test_l3_*.py`.
+- L3 judge and the four guards (worktree `build/vendor-receipts-b`, branch `lane-b`): `app/judge/` (init excepted),
+  `tests/test_l3_*.py`.
+- L6 receipt checks (worktree `build/vendor-receipts-l6`, branch `l6`): `app/check/` (init excepted), `tests/test_l6_*.py`.
 - L5 outputs, pipeline, batch (worktree `build/vendor-receipts-l5`, branch `l5`): `app/out/` (init excepted),
   `app/pipeline.py`, `app/run.py`, `app/cli.py`, `tests/test_l5_*.py`, `tests/fixtures/`, `tests/smoke_cases.jsonl`,
   `tests/smoke_labels.csv`.
