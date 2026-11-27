@@ -19,7 +19,7 @@ QUICK   ?= data/cases_quick.jsonl
 RUN_ID  ?= $(shell date +%H%M)
 export WALL_CAP CONC RUN_ID
 
-.PHONY: check test smoke eval holdout cases green batch one usage quick report baseline control
+.PHONY: check test smoke eval holdout cases green batch one usage quick report baseline control accept
 # check = unit tests + smoke from the cache: under 30 s. The eval runs separately (never inside a lane's loop).
 check: test smoke
 	@echo "CHECK PASSED $$(date +%H:%M) $$(git rev-parse --short HEAD 2>/dev/null)"
@@ -75,8 +75,9 @@ quick:
 
 # Report of a run (evalkit, lane L4): make report PREDS=runs/preds_dev.jsonl RUN_ID=<id> [SPLIT=dev]
 SPLIT ?= dev
+REPORTOPT ?=
 report:
-	$(KC) $(PY) -m evalkit.report --preds $(PREDS) --split $(SPLIT) --run-dir runs/$(RUN_ID) --out runs/$(RUN_ID)/report.md \
+	$(KC) $(PY) -m evalkit.report $(REPORTOPT) --preds $(PREDS) --split $(SPLIT) --run-dir runs/$(RUN_ID) --out runs/$(RUN_ID)/report.md \
 	  --save runs/eval/report_$(RUN_ID).json $$([ -f runs/eval/report_prev.json ] && echo --prev runs/eval/report_prev.json)
 
 # Plain baseline on the same retrieved data: make baseline RUN_ID=<id>
@@ -85,3 +86,8 @@ baseline:
 
 control:
 	$(KC) $(RUN) --cases tests/control_cases.jsonl --out runs/control_$(RUN_ID).jsonl
+	python3 -m evalkit.controls --preds runs/control_$(RUN_ID).jsonl
+
+# Accept a report as the regression baseline for the next one: make accept RUN_ID=<id>
+accept:
+	cp runs/eval/report_$(RUN_ID).json runs/eval/report_prev.json
