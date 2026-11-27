@@ -10,7 +10,9 @@ LABELS (env) names the CSV, default data/hackathon_40_solutions_commented.csv (r
 Columns: id, url, product, vendor, overall, green_flags, yellow_flags, red_flags, reasoning, reviewer_notes_original.
 Never print rows: callers write ids, colors and aggregates only.
 """
-import importlib.util, os
+import importlib.util, os, threading
+
+_ev_lock = threading.Lock()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT = "data/hackathon_40_solutions_commented.csv"
@@ -22,10 +24,12 @@ _ev = None
 def ev():
     """tools/eval.py as a module (it is a script, not a package)."""
     global _ev
-    if _ev is None:
-        spec = importlib.util.spec_from_file_location("_tools_eval", os.path.join(ROOT, "tools", "eval.py"))
-        _ev = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_ev)
+    with _ev_lock:  # products run in threads: never hand out a half-initialised module
+        if _ev is None:
+            spec = importlib.util.spec_from_file_location("_tools_eval", os.path.join(ROOT, "tools", "eval.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _ev = mod
     return _ev
 
 
