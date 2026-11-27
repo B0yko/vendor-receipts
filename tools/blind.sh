@@ -54,13 +54,13 @@ case ${1:-} in
     RUN_ID=${RUN_ID:-blind-rerun} batch "$CSV" runs/rerun.jsonl "ONLY=$2"
     # the rerun's export holds only the rerun ids: rebuild the full submission (the last non-error line per id wins)
     cat runs/verdicts.jsonl runs/rerun.jsonl > runs/verdicts_all.jsonl
-    python3 -m app.run --cases "$CSV" --from-jsonl runs/verdicts_all.jsonl --out runs/verdicts_final.jsonl --submit "$SUBMIT"
+    python3 -m app.run --cases "$CSV" --from-jsonl runs/verdicts_all.jsonl --submit "$SUBMIT"
     echo "blind: submission rebuilt from runs/verdicts_all.jsonl"
     ;;
   rebuild)
     CSV=${2:-data/blind.csv}
     worktree; cd "$W"
-    python3 -m app.run --cases "$CSV" --from-jsonl "${OUT:-runs/verdicts.jsonl}" --out runs/verdicts_final.jsonl --submit "$SUBMIT"
+    python3 -m app.run --cases "$CSV" --from-jsonl "${OUT:-runs/verdicts.jsonl}" --submit "$SUBMIT"
     ;;
   ship)
     cd "$M"
