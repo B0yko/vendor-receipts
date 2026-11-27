@@ -57,7 +57,9 @@ case ${1:-} in
     [ -f stackgini-verdicts.csv ] && [ -d traces ] || die "no stackgini-verdicts.csv or traces/ in $M"
     if [ "${ALLOW_LABELLED:-1}" = 1 ]; then
       export PREPUSH_ALLOW_LABELLED_SOURCES=1
+      python3 tools/redact_labelled.py --row-text --keep-sources   # labelled row text stays blocked (Andrii 17:54)
     else
+      python3 tools/redact_labelled.py --row-text
       python3 tools/redact_labelled.py
     fi
     git add stackgini-verdicts.csv traces

@@ -227,7 +227,10 @@ def _pi(system, user, purpose, account):
 
 
 def _text(system, user, purpose):
-    """One model answer as text, with one failover to the next account on a limit error."""
+    """One model answer as text, with one failover to the next account on a limit error.
+    MODEL_BACKEND=openrouter sends every call straight to OpenRouter (same model and effort, so the cache is shared)."""
+    if os.environ.get("MODEL_BACKEND") == "openrouter" and os.environ.get("LLM_OR_KEY"):
+        return _openrouter(system, user, purpose, ["MODEL_BACKEND=openrouter"])
     accs = _accounts()
     start = next(_rr) % len(accs)
     errors = []
