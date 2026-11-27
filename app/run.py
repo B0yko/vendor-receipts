@@ -2,6 +2,10 @@
 
   python3 -m app.run --cases FILE --out FILE [--only id,url,...] [--concurrency N] [--wall-cap S] [--runs-dir DIR]
                      [--submit DIR]
+  python3 -m app.run --cases FILE --from-jsonl FILE [--submit DIR]  # rebuild exports without running research
+
+Single-wave batches stop new model calls at start + cap + 60s. At a product's cap + 120s, or Ctrl-C,
+the coordinator saves finished verdicts and marks unfinished cases before exiting without joining workers.
 
 Cases: CSV with a url column (the blind file: id,url,product,vendor; quoted fields and a BOM are fine), JSONL
 ({"url", "id"?, "product"?, "vendor"?} per line), or one URL per line (# comments allowed). A missing id is the slug.
@@ -19,7 +23,7 @@ yellow_flags,red_flags,reasoning; input order; product and vendor from the input
 RECEIPTS_FAKE=1 swaps research for tests/fixtures/research/<slug>.json (RECEIPTS_FIXTURES overrides the folder).
 Concurrency: --concurrency or CONC (default 8); wall cap: --wall-cap or WALL_CAP (default 1200 s).
 """
-import argparse, concurrent.futures as cf, csv, datetime, io, json, os, statistics, subprocess, sys, threading, time
+import argparse, concurrent.futures as cf, csv, datetime, io, json, os, statistics, subprocess, sys, time
 
 from app import ledger, model, pipeline
 from app.out import writer
@@ -142,6 +146,35 @@ def case_record(case, v):
             **{k: st.get(k) for k in STAT_KEYS}, "trace": v.get("trace")}
 
 
+NO_VERDICT = "No verdict: the run did not finish for this product."
+WALL_ERROR = "wall cap reached; partial research is in its run dir"
+
+
+def unfinished(case, error):
+    v = pipeline.error_verdict(case["url"], error)
+    v.update(hints_of(case), trace="")
+    if error == NO_VERDICT:
+        v.update(reasoning=NO_VERDICT, reasons=[])
+    return v
+
+
+def export(cases, lines, out, submit, fill_missing=False):
+    """Join by case id in input order. An errored rerun cannot displace a valid verdict."""
+    best = {}
+    for v in lines:
+        key = _key(v)
+        if not v.get("error") or key not in best or best[key].get("error"):
+            best[key] = v
+    rows = [(c, best[c['id']] if c['id'] in best else unfinished(c, NO_VERDICT))
+            for c in cases if fill_missing or c['id'] in best]
+    stem, _ = os.path.splitext(out)
+    writer.write_csv([v for _, v in rows], stem + ".csv")
+    if submit:
+        csv_path, traces = writer.write_submission(rows, submit)
+        print(f"submission: {csv_path} ({len(rows)} rows of {len(cases)} cases), {len(traces)} traces in "
+              f"{os.path.join(submit, 'traces')}", file=sys.stderr, flush=True)
+
+
 def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="runs", research_fn=None,
               replace_only=False, all_cases=None, submit=None):
     """Runs `cases`, appends verdicts to `out`, writes the CSVs, the manifest and (with `submit`) the submission;
@@ -158,10 +191,10 @@ def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="r
     with open(out, "w", encoding="utf-8") as f:
         f.writelines(writer.jsonl_line(v) + "\n" for v in kept)
     started, t0 = datetime.datetime.now().isoformat(timespec="seconds"), time.time()
-    lock, done, results = threading.Lock(), [0], {}
+    results, pending, starts = {}, {}, {}
+    workers = max(1, int(concurrency))
 
-    def one(c):
-        start = time.time()
+    def one(c, start):
         try:
             v = pipeline.check_vendor(c["url"], os.path.join(run_root, c["slug"]), deadline=start + wall_cap,
                                       research_fn=research_fn, hints=hints_of(c))
@@ -170,30 +203,74 @@ def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="r
             v.update({"trace": "", "run_id": run_id, "seconds": round(time.time() - start, 1),
                       "mode": model.mode(), "model": model.model_id()})
         v["id"] = c["id"]
-        writer.append_jsonl(v, out, lock)
-        with lock:
-            done[0] += 1
-            results[c["id"]] = v
-            err = f" error: {v['error']}" if v.get("error") else ""
-            print(f"[{done[0]}/{len(cases)}] {c['slug']} {v.get('overall')} {round(v.get('seconds') or 0)}s"
-                  f"{steps_text(v)}{err}",
-                  file=sys.stderr, flush=True)
         return v
 
-    with cf.ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as ex:
-        list(ex.map(one, cases))
+    def record(c, v):
+        writer.append_jsonl(v, out)
+        results[c['id']] = v
+        err = f" error: {v['error']}" if v.get('error') else ''
+        print(f"[{len(results)}/{len(cases)}] {c['slug']} {v.get('overall')} {round(v.get('seconds') or 0)}s"
+              f"{steps_text(v)}{err}", file=sys.stderr, flush=True)
+
+    def record_unfinished(c, msg):
+        start = starts.get(c['id'])
+        v = unfinished(c, msg)
+        v.update(run_id=run_id, seconds=round(time.time() - start, 1) if start is not None else 0,
+                 mode=model.mode(), model=model.model_id(), stats={'capped': msg == WALL_ERROR})
+        record(c, v)
+
+    previous_stop = os.environ.pop('MODEL_HARD_STOP', None)
+    if workers >= len(cases):
+        os.environ['MODEL_HARD_STOP'] = str(t0 + wall_cap + 60)
+    else:
+        print('warning: multiple waves; MODEL_HARD_STOP unset (per-product deadlines still apply)', file=sys.stderr)
+    ex = cf.ThreadPoolExecutor(max_workers=workers)
+    exit_code = None
+    todo = iter(cases)
+    try:
+        while True:
+            # Dispatch only into free slots: queued products do not spend their wall budget waiting.
+            while len(pending) < workers and (c := next(todo, None)) is not None:
+                start = starts[c['id']] = time.time()
+                pending[ex.submit(one, c, start)] = c
+            if not pending:
+                break
+            limit = min(starts[c['id']] for c in pending.values()) + wall_cap + 120
+            ready, _ = cf.wait(pending, timeout=max(0, limit - time.time()), return_when=cf.FIRST_COMPLETED)
+            for future in ready:
+                record(pending[future], future.result())
+                del pending[future]
+            now = time.time()
+            for future, c in list(pending.items()):
+                if now >= starts[c['id']] + wall_cap + 120 and not future.done():
+                    record_unfinished(c, WALL_ERROR)
+                    del pending[future]
+                    workers -= 1  # this thread may never return; other products keep their own deadline
+                    exit_code = 0
+    except KeyboardInterrupt:
+        exit_code = 130
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+        if exit_code is None:
+            os.environ.pop('MODEL_HARD_STOP', None)
+            if previous_stop is not None:
+                os.environ['MODEL_HARD_STOP'] = previous_stop
+    if exit_code is not None:
+        # SIGINT can arrive between the successful JSONL append and its in-memory bookkeeping.
+        results.update((_key(v), v) for v in _load_lines(out) if _key(v) in selected)
+        for future, c in pending.items():
+            if c['id'] not in results and future.done() and not future.cancelled():
+                try:
+                    record(c, future.result())
+                except KeyboardInterrupt:
+                    exit_code = 130
+        for c in cases:
+            if c['id'] not in results:
+                record_unfinished(c, 'interrupted by user' if exit_code == 130 else NO_VERDICT)
     ordered = [results[c["id"]] for c in cases]
     # CSVs hold every verdict in --out (kept lines from earlier runs too), in the order of the full case list.
-    order = {c["id"]: i for i, c in enumerate(all_cases)}
-    everything = sorted(kept + ordered, key=lambda v: order.get(_key(v), len(order)))
+    export(all_cases, kept + ordered, out, submit)
     stem, _ = os.path.splitext(out)
-    writer.write_csv(everything, stem + ".csv")
-    if submit:
-        by_id = {_key(v): v for v in everything}
-        rows = [(c, by_id[c["id"]]) for c in all_cases if c["id"] in by_id]
-        csv_path, traces = writer.write_submission(rows, submit)
-        print(f"submission: {csv_path} ({len(rows)} rows of {len(all_cases)} cases), {len(traces)} traces in "
-              f"{os.path.join(submit, 'traces')}", file=sys.stderr, flush=True)
     manifest = {"run_id": run_id, "git": git_state(), "model": model.model_id(), "mode": model.mode(),
                 "llm_extra": llm_extras(), "disconfirm": os.environ.get("DISCONFIRM", "1"),
                 "judge_views": os.environ.get("JUDGE_VIEWS", ""), "audit": os.environ.get("AUDIT", "1"),
@@ -206,13 +283,17 @@ def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="r
     errors = sum(1 for v in ordered if v.get("error"))
     print(f"done {len(ordered)} cases in {manifest['seconds']}s, {errors} errors; {out}, {stem}.csv, "
           f"{os.path.join(run_root, 'manifest.json')}", file=sys.stderr, flush=True)
+    if exit_code is not None:
+        os._exit(exit_code)  # executor threads may be stuck; interpreter shutdown would join them
     return ordered
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--cases", required=True)
-    ap.add_argument("--out", required=True)
+    dest = ap.add_mutually_exclusive_group(required=True)
+    dest.add_argument("--out")
+    dest.add_argument("--from-jsonl", help="rebuild exports from saved verdicts; do not run any product")
     ap.add_argument("--only", default="")
     ap.add_argument("--concurrency", type=int, default=int(os.environ.get("CONC") or 8))
     ap.add_argument("--wall-cap", type=float, default=float(os.environ.get("WALL_CAP") or 1200))
@@ -224,6 +305,11 @@ def main(argv=None):
     if not cases:
         print(f"no cases selected from {a.cases}" + (f" with --only {a.only}" if a.only else ""), file=sys.stderr)
         return 2
+    if a.from_jsonl:
+        if not os.path.isfile(a.from_jsonl):
+            ap.error("--from-jsonl must name an existing verdict file")
+        export(cases, _load_lines(a.from_jsonl), a.from_jsonl, a.submit, fill_missing=True)
+        return 0
     run_cases(cases, a.out, a.concurrency, a.wall_cap, runs_dir=a.runs_dir, replace_only=bool(a.only),
               all_cases=all_cases, submit=a.submit or None)
     return 0

@@ -301,14 +301,14 @@ def render(research, receipts, verdict):
             L.append("None.")
         for f in flags:
             ids = f.get("receipts") or []
-            first = by_id.get(ids[0], {}) if ids else {}
-            quote = _inline(first.get("quote") or f.get("quote"))
+            source = next((by_id[i] for i in ids if by_id.get(i, {}).get("kept")), f)
+            quote = _inline(source.get("quote"))
             L += [f"- **{_inline(f.get('text'))}** (category {f.get('category', '?')}, {f.get('severity', '?')}, "
                   f"basis {f.get('basis', '?')}, corroboration {f.get('corroboration', '?')})",
-                  f"  - URL: {f.get('url') or first.get('url', '')}",
+                  f"  - URL: {source.get('url', '')}",
                   f"  - Quote: \"{quote}\"",
-                  f"  - Date: {f.get('date') or first.get('date') or 'undated'} · author: "
-                  f"{f.get('author') or first.get('author_type', '?')}"]
+                  f"  - Date: {source.get('date') or 'undated'} · author: "
+                  f"{source.get('author_type') or source.get('author', '?')}"]
             for rid in ids:
                 rc = by_id.get(rid)
                 if rc is None:

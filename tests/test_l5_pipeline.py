@@ -109,7 +109,7 @@ class Base(unittest.TestCase):
         self.addCleanup(env.stop)
         for k in ("DISCONFIRM", "JUDGE_VIEWS", "AUDIT"):
             os.environ.pop(k, None)
-        for name, fn in (("_check", stub_check), ("_judge", stub_judge), ("_disconfirm", absent_disconfirm),
+        for name, fn in (("_check", stub_check), ("_judge", lambda r, rc, deadline=None: stub_judge(r, rc)), ("_disconfirm", absent_disconfirm),
                          ("_audit", absent_audit)):
             p = mock.patch.object(pipeline, name, side_effect=fn)
             p.start()
@@ -353,7 +353,7 @@ class TestBlindAndSubmission(Base):
         self.assertEqual(v["id"], "9")
 
     def test_judge_error_is_kept(self):
-        with mock.patch.object(pipeline, "_judge", side_effect=lambda r, rc: stub_judge(r, rc) | {"error": "judge: x"}):
+        with mock.patch.object(pipeline, "_judge", side_effect=lambda r, rc, deadline=None: stub_judge(r, rc) | {"error": "judge: x"}):
             v = pipeline.check_vendor("https://example.com", os.path.join(self.dir, "r", "y"),
                                       research_fn=self.research_fn)
         self.assertEqual(v["error"], "judge: x")
@@ -589,7 +589,7 @@ class TestCapAuditSteps(Base):
         st = v["stats"]["steps"]  # one tick per plain step; disconfirmation reads the clock itself
         self.assertEqual((st["research"], st["check"], st["judge"], st["audit"]), (5.0, 5.0, 5.0, 5.0), st)
 
-        def boom(r, rc, views=None):
+        def boom(r, rc, deadline=None):
             raise ValueError("judge broke")
         with mock.patch.object(pipeline, "_judge", side_effect=boom):
             v, rd = self.run_one()

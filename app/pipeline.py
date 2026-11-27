@@ -141,15 +141,17 @@ def _stats(research, receipts, steps=None, verdict=None):
             "audit": trace_md.audit_summary(verdict or {}), "steps": dict(steps or dict.fromkeys(STEPS))}
 
 
-def _judge(research, receipts, views=None):
-    """views=None: the judge's default (JUDGE_VIEWS). views=1 near the cap, logged in the verdict's guards."""
+def _judge(research, receipts, deadline=None):
+    """Use the product deadline to budget views; pass it through to deadline-aware judges."""
     from app.judge.judge import judge
+    kwargs = {"deadline": deadline} if _takes(judge, "deadline") else {}
+    views = judge_views(deadline)
     if views is None:
-        return judge(research, receipts)
+        return judge(research, receipts, **kwargs)
     if _takes(judge, "views"):
-        v, note = dict(judge(research, receipts, views=views)), "judge: single view (cap)"
+        v, note = dict(judge(research, receipts, views=views, **kwargs)), "judge: single view (cap)"
     else:
-        v, note = dict(judge(research, receipts)), "judge: single view wanted (cap), but this judge takes no views arg"
+        v, note = dict(judge(research, receipts, **kwargs)), "judge: single view wanted (cap), but this judge takes no views arg"
     v["guards"] = list(v.get("guards") or []) + [note]
     return v
 
@@ -216,8 +218,7 @@ def check_vendor(url, run_dir, deadline=None, research_fn=None, hints=None):
         research, receipts = timed("disconfirm", disconfirmation, research, receipts, deadline)
         _dump(run_dir, "research.json", research)
         _dump(run_dir, "receipts.json", receipts)
-        views = judge_views(deadline)
-        v = dict(timed("judge", _judge, research, receipts, **({"views": views} if views else {})))
+        v = dict(timed("judge", _judge, research, receipts, deadline=deadline))
         ident = research.get("identity") or {}
         for k in ("product", "vendor", "parent", "former_names"):
             v.setdefault(k, ident.get(k, [] if k == "former_names" else ""))
