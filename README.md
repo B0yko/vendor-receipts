@@ -18,6 +18,20 @@ checks it passed), the reasoning with receipt ids such as `[e12]`, the 24-catego
 were rejected and why, and the sources that failed to load. The first line of each trace links back to its CSV row.
 
 ## How it works
+
+```mermaid
+flowchart TD
+    U["Product URL"] --> A["1 Identity<br/>vendor, legal entity, owner, former names"]
+    A --> B["2 Site read<br/>the vendor's own claims and core promise"]
+    B --> C["3 Research loop<br/>24 categories, outside the vendor's site"]
+    C -->|a finding opens new questions| C
+    C --> D["4 Receipt checks<br/>quote on the page, same company, says it, dated"]
+    D -->|fails| X["Rejected<br/>kept in the trace, never used"]
+    D --> E["5 Disconfirmation<br/>searches for evidence against each serious finding"]
+    E --> F["6 Judge<br/>three views and four guards in code"]
+    F --> G["7 Self-audit<br/>a sentence without a receipt is removed"]
+    G --> V["Green / Yellow / Red<br/>every flag with a quote and a link, plus the trace"]
+```
 1. Identity. The agent pins down the product, the vendor, the legal entity, the parent company, former names, domains
    and key people. This is where a company with the same name gets ruled out.
 2. Site read. It reads up to 15 of the vendor's own pages (about, imprint, customers, pricing, security, privacy,
