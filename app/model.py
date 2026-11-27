@@ -16,7 +16,8 @@ Env: MODEL_ID (pi-claude-tether/claude-opus-5-5), MODEL_THINKING (xhigh), MODEL_
 Tests: model.set_fake(purpose, fn) with fn(system, user) -> dict; model.clear_fakes().
 Smoke: RECEIPTS_FAKE=1 answers from $RECEIPTS_FAKE_DIR/<purpose>.json (default tests/fixtures/fake); a file of the
 form {"by_marker": {"marker text": answer, ...}, "default": answer} picks the first marker found in the user text.
-Purposes in use: intake, round, says_it, judge, baseline, match, extra, classify.
+Purposes in use: intake, round, says_it, disconfirm_plan, disconfirm, judge (+ judge_all, judge_external,
+judge_devil), baseline, match, extra, classify.
 """
 import itertools, json, os, re, subprocess, sys, tempfile, threading, time
 

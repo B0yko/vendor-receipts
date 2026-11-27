@@ -36,7 +36,10 @@ Research (what app.research.agent.research returns; every key present, see new_r
                "fetched_at"}},       # every retrieved text, by URL: the resolves check reads quotes from here
    "sources_failed": [{"what": "url or query", "error": "..."}],
    "rounds": [{"n": 1, "actions": [{"tool", "args", "category", "hypothesis"}], "new_evidence": 7, "seconds": 41.2}],
-   "stats": {"tool_calls": 0, "llm_calls": 0, "capped": False}}
+   "stats": {"tool_calls": 0, "llm_calls": 0, "capped": False},
+   "disconfirmation": {"targets", "queries", "outcomes": [{"target", "outcome": "survived|weakened|refuted", "why",
+                       "evidence"}], "seconds"} | {"skipped": "..."}   (added by app/check/disconfirm.py, optional)}
+  deadline arguments everywhere are time.time() values.
 
 Flag (in a Verdict): {"text", "category", "severity", "url", "quote", "date", "author", "corroboration": "one |
    independent", "basis": BASES, "receipts": ["e3", "e7"]}  (url, quote, date, author come from the first receipt)
@@ -198,7 +201,10 @@ def new_research(url):
             "matrix": {str(k): {"status": "open", "queries": [], "sources": [], "evidence": [], "note": ""}
                        for k in CATEGORIES},
             "claim_checks": [], "evidence": [], "sources": {}, "sources_failed": [], "rounds": [],
-            "stats": {"tool_calls": 0, "llm_calls": 0, "capped": False}}
+            "stats": {"tool_calls": 0, "llm_calls": 0, "capped": False},
+   "disconfirmation": {"targets", "queries", "outcomes": [{"target", "outcome": "survived|weakened|refuted", "why",
+                       "evidence"}], "seconds"} | {"skipped": "..."}   (added by app/check/disconfirm.py, optional)}
+  deadline arguments everywhere are time.time() values.
 
 
 def slug(url):
