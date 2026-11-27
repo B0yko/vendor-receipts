@@ -4,9 +4,11 @@ apply(verdict, research, receipts) -> verdict, with one line per change in verdi
   G4 a flag with no kept receipt is dropped (a failed source is no signal);
   G2 a flag whose kept receipts are all user_review is dropped, its text goes to blind_spots as "users report ...";
   G3 a red flag of category 14 (site quality) moves to yellow;
-  G1 Red needs a red flag with an external receipt (independent and not vendor_self) or a contradicted claim check
-     backed by a kept receipt, else Yellow; Red with no red flag left -> Yellow; Green with a surviving red flag backed
-     by an external receipt -> Yellow;
+  G1 a red flag whose kept receipts are all vendor_self (a claim, never proof) moves to yellow, unless one of them
+     backs a contradicted claim check (a receipted contradiction on the vendor's own site);
+     Red needs a red flag with an external receipt (independent and not vendor_self) or a vendor statement against
+     its own interest (vendor_against_interest, any domain), or a contradicted claim check backed by a kept receipt,
+     else Yellow; Red with no red flag left -> Yellow; Green with any surviving red flag -> Yellow;
   G3 a Yellow resting only on category-14 flags becomes Green when a kept green flag shows the product alive
      (categories 4-7), else stays Yellow, logged "too little evidence".
 `call` always equals the final `overall`.
@@ -46,8 +48,10 @@ def apply(verdict, research, receipts):
     def kept(f):
         return [by_id[i] for i in f.get("receipts", []) if i in by_id and by_id[i].get("kept")]
 
-    def external(f):
-        return any(r.get("independent") and r.get("author_type") != "vendor_self" for r in kept(f))
+    def red_basis(f):
+        """An external receipt or a vendor statement against its own interest (decision L3-2)."""
+        return any((r.get("independent") and r.get("author_type") != "vendor_self")
+                   or r.get("author_type") == "vendor_against_interest" for r in kept(f))
 
     for b in BUCKETS:
         survivors = []
@@ -69,22 +73,27 @@ def apply(verdict, research, receipts):
     verdict["red_flags"] = [f for f in verdict["red_flags"] if f.get("category") != SITE_QUALITY]
     verdict["yellow_flags"] = moved + verdict["yellow_flags"]
 
+    contradicted = {i for c in research.get("claim_checks", []) if c.get("status") == "contradicted"
+                    for i in c.get("evidence", []) if by_id.get(i, {}).get("kept")}
+    claims_only = [f for f in verdict["red_flags"] if all(r.get("author_type") == "vendor_self" for r in kept(f))
+                   and not contradicted & set(f.get("receipts", []))]
+    for f in claims_only:
+        log.append(f"G1 moved red flag '{_short(f.get('text'))}' to yellow: the vendor's own claims only, never proof")
+    verdict["red_flags"] = [f for f in verdict["red_flags"] if not any(f is m for m in claims_only)]
+    verdict["yellow_flags"] = claims_only + verdict["yellow_flags"]
+
     red = verdict["red_flags"]
     if verdict["overall"] == "Red":
-        contradicted = [c.get("claim_id") for c in research.get("claim_checks", []) if c.get("status") == "contradicted"
-                        and any(by_id.get(i, {}).get("kept") for i in c.get("evidence", []))]
         if not red:
             verdict["overall"] = "Yellow"
             log.append("G1 Red -> Yellow: no red flag left")
-        elif not any(external(f) for f in red) and not contradicted:
+        elif not any(red_basis(f) for f in red) and not contradicted:
             verdict["overall"] = "Yellow"
-            log.append("G1 Red -> Yellow: no red flag has an external receipt and no claim check is contradicted by a "
-                       "kept receipt")
-    elif verdict["overall"] == "Green":
-        ext = [f for f in red if external(f)]
-        if ext:
-            verdict["overall"] = "Yellow"
-            log.append(f"G1 Green -> Yellow: red flag '{_short(ext[0].get('text'))}' has an external receipt")
+            log.append("G1 Red -> Yellow: no red flag has an external receipt or a vendor statement against its own "
+                       "interest, and no claim check is contradicted by a kept receipt")
+    elif verdict["overall"] == "Green" and red:
+        verdict["overall"] = "Yellow"
+        log.append(f"G1 Green -> Yellow: red flag '{_short(red[0].get('text'))}' survived the guards")
 
     negatives = verdict["red_flags"] + verdict["yellow_flags"]
     if verdict["overall"] == "Yellow" and negatives and all(f.get("category") == SITE_QUALITY for f in negatives):

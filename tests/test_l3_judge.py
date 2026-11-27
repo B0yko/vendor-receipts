@@ -23,7 +23,8 @@ def receipt(id, category, author="trade_press", url="https://news.example.org/ac
 def research():
     r = ledger.new_research("https://acme.example.com")
     r["identity"].update(product="Acme Ledger", vendor="Acme GmbH", parent="Acme Holdings", former_names=["AcmeBooks"],
-                         domains=["acme.example.com"])
+                         domains=["acme.example.com"], legal_entity="Acme Software GmbH",
+                         notes="buyer hint: product Acme Ledger, vendor Acme GmbH")
     r["site"].update(core_promise="bookkeeping for small firms", segment="SMB",
                      claims=[{"id": "c1", "text": "SOC 2 certified", "kind": "certification", "quote": "We are SOC 2",
                               "url": "https://acme.example.com/trust"}])
@@ -46,7 +47,10 @@ def receipts():
             receipt("e7", 19, author="user_review", url="https://reviews.example.net/acme", date="2026-05-20"),
             receipt("e8", 14, author="vendor_self", url="https://acme.example.com/", severity="minor"),
             receipt("e9", 9, author="authority", url="https://gov.example.org/order", severity="critical"),
-            receipt("e10", 8, author="vendor_self", url="https://acme.example.com/trust", severity="critical")]
+            receipt("e10", 8, author="vendor_self", url="https://acme.example.com/trust", severity="critical"),
+            receipt("e12", 8, author="trade_press", url="https://acme.example.com/press/award", severity="critical"),
+            receipt("e13", 4, author="vendor_against_interest", url="https://acme.example.com/eol",
+                    severity="critical", text="Acme Ledger ends in 2027 with no successor")]
 
 
 def flag(text, category, ids, severity="moderate", basis="confirmed"):
@@ -119,7 +123,8 @@ class TestJudge(Base):
         self.assertIn('"reposts": [{"id": "e4"', user)  # repost listed under its original
         self.assertNotIn('{"id": "e4", "category"', user)
         for part in ("bookkeeping for small firms", "SOC 2 certified", "9 Regulators: searched_not_found",
-                     "releases monthly", "Acme GmbH", "CLAIM CHECKS:\n(none)"):
+                     "releases monthly", "Acme GmbH", "CLAIM CHECKS:\n(none)",
+                     "Acme Software GmbH", "Acme Holdings", "AcmeBooks", "buyer hint: product Acme Ledger"):
             self.assertIn(part, user)
         for part in (ledger.COLOR_RULE, ledger.GUARDS, ledger.REVIEW_RULES, ledger.AUTHOR_TYPES["authority"]):
             self.assertIn(part, system)
@@ -179,17 +184,45 @@ class TestGuards(Base):
         self.assertTrue(any("too little evidence" in g for g in v["guards"]))
 
     def test_g1_red_without_external_receipt_becomes_yellow(self):
-        v = self.run_judge(answer("Red", red=[flag("Claims SOC 2 without a report", 8, ["e10"], "critical")]))
+        v = self.run_judge(answer("Red", red=[flag("Award claim is copied press", 8, ["e12"], "critical")]))
         self.assertEqual(v["overall"], "Yellow")
-        self.assertEqual(len(v["red_flags"]), 1)
+        self.assertEqual(len(v["red_flags"]), 1)  # press on the vendor's own domain: not external, not a claim only
         self.assertTrue(any(g.startswith("G1 Red -> Yellow: no red flag has an external receipt") for g in v["guards"]))
+
+    def test_g1_vendor_self_red_flag_moves_to_yellow(self):
+        """Decision L3-2 #2: a red flag on the vendor's own claims only is never proof."""
+        v = self.run_judge(answer("Red", red=[flag("Claims SOC 2 without a report", 8, ["e10", "e1"], "critical")]))
+        self.assertEqual((v["overall"], v["red_flags"]), ("Yellow", []))
+        self.assertEqual([f["text"] for f in v["yellow_flags"]], ["Claims SOC 2 without a report"])
+        self.assertTrue(any(g.startswith("G1 moved red flag 'Claims SOC 2") for g in v["guards"]))
+        self.assertTrue(any(g.startswith("G1 Red -> Yellow: no red flag left") for g in v["guards"]))
+
+    def test_g1_vendor_against_interest_on_own_domain_holds_red(self):
+        """Decision L3-2 #1: the vendor's own end-of-life notice is a valid Red basis."""
+        v = self.run_judge(answer("Red", red=[flag("Ends in 2027 with no successor", 4, ["e13"], "critical")]))
+        self.assertEqual((v["overall"], v["guards"]), ("Red", []))
+        f = v["red_flags"][0]
+        self.assertEqual((f["author"], f["url"]), ("vendor_against_interest", "https://acme.example.com/eol"))
+
+    def test_g1_green_with_any_red_flag_becomes_yellow(self):
+        """Decision L3-2 #2: a Green with any surviving red flag is Yellow, whatever the receipt's author."""
+        v = self.run_judge(answer("Green", red=[flag("Award claim is copied press", 8, ["e12"], "critical")],
+                                  green=[flag("Monthly releases", 5, ["e2"])]))
+        self.assertEqual((v["overall"], len(v["red_flags"])), ("Yellow", 1))
+        self.assertTrue(any(g.startswith("G1 Green -> Yellow: red flag 'Award claim") for g in v["guards"]))
+        v = self.run_judge(answer("Green", red=[flag("Ends in 2027 with no successor", 4, ["e13"], "critical")],
+                                  green=[flag("Monthly releases", 5, ["e2"])]))
+        self.assertEqual(v["overall"], "Yellow")
+        v = self.run_judge(answer("Green", red=[flag("Claims SOC 2 without a report", 8, ["e10"], "critical")],
+                                  green=[flag("Monthly releases", 5, ["e2"])]))
+        self.assertEqual((v["overall"], v["red_flags"], len(v["yellow_flags"])), ("Green", [], 1))  # moved first
 
     def test_g1_red_stands_on_a_receipted_contradiction(self):
         res = research()
         res["claim_checks"] = [{"claim_id": "c1", "status": "contradicted", "evidence": ["e10"], "note": "n"}]
         v = self.run_judge(answer("Red", red=[flag("SOC 2 claim is false", 8, ["e10"], "critical", "contradicted")]),
                            res=res)
-        self.assertEqual(v["overall"], "Red")
+        self.assertEqual((v["overall"], len(v["red_flags"])), ("Red", 1))  # vendor_self, but receipted contradiction
         res["claim_checks"][0]["evidence"] = ["e5"]  # rejected receipt: not a receipted contradiction
         v = self.run_judge(answer("Red", red=[flag("SOC 2 claim is false", 8, ["e10"], "critical", "contradicted")]),
                            res=res)
