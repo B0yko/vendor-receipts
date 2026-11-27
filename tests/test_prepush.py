@@ -509,10 +509,75 @@ class TestRedact(GuardRepo):
         self.put("app/keep.md", "zentrovia.test\n")  # outside the two places: never touched
         rc, out = self.redact()
         self.assertEqual(rc, 1)
-        self.assertIn("left: traces/b9.md:2 (labelled text, edit by hand)", out)
+        self.assertIn("left: traces/b9.md:2 (labelled text, run with --row-text)", out)
         self.assertIn("0 labelled-source, 1 labelled text", out)
         self.assertEqual(self.read("app/keep.md"), "zentrovia.test\n")
         self.no_terms(out)
+
+    def test_ship_withholds_passages_not_sources(self):
+        mark = redact_labelled.PASSAGE_MARK
+        src = 'Zentrovia https://zentrovia.test/about'
+        trace = (f'# Audit\r\n\r\n- {src}. Private prefix: {ROW1_TEXT}! Safe remainder.\r\n'
+                 f'| {src} | {ROW1_TEXT}. Details. | Still here |\r\n'
+                 f'> "{ROW2_TEXT}." Keep this.\r\n')
+        verdicts = table(['id', 'source', 'reasoning'], [['b1', src, f'Quote, "{ROW1_TEXT}"\r\nmore']])
+        paths = ('traces/b1.md', prepush.ZONE_FILE)
+        for p, text in zip(paths, (trace, verdicts)):
+            self.put(p, text)
+        flags = ('--row-text', '--keep-sources')
+        rc, out = self.redact('--dry-run', *flags)
+        self.assertEqual(rc, 0, out)
+        self.no_terms(out)
+        self.assertEqual([self.read(p) for p in paths], [trace, verdicts])
+        rc, out = self.redact(*flags)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('4 passages (2 labelled rows)', out)
+        self.no_terms(out)
+        expected = (f'# Audit\r\n\r\n- {src}. {mark} Safe remainder.\r\n'
+                    f'| {src} | {mark} | Still here |\r\n'
+                    f'> {mark} Keep this.\r\n')
+        csv_expected = verdicts.replace(f'Quote, ""{ROW1_TEXT}""\r\nmore', mark)
+        self.assertEqual([self.read(p) for p in paths], [expected, csv_expected])
+        rc, out = self.redact(*flags)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('withheld in 0 files', out)
+        self.assertEqual([self.read(p) for p in paths], [expected, csv_expected])
+        self.commit('checked output')
+        self.assertEqual(self.publish('--allow-labelled-sources')[0], 0)
+        self.assertEqual(self.publish()[0], 1)  # strict still rejects the source
+
+    def test_cross_cell_and_cross_sentence_matches(self):
+        a, b = ROW1_TEXT.split(' openly ', 1)
+        mark = redact_labelled.PASSAGE_MARK
+        self.put('traces/b1.md', f'Safe. {a}? Openly {b}! Kept.\n| {a} | openly {b} | Safe |\n')
+        self.put(prepush.ZONE_FILE, table(['first', 'second', 'third'], [[a, 'openly ' + b, 'safe']]))
+        rc, out = self.redact('--row-text')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.read('traces/b1.md'), f'Safe. {mark} {mark} Kept.\n| {mark} | {mark} | Safe |\n')
+        self.assertEqual(self.read(prepush.ZONE_FILE), table(['first', 'second', 'third'], [[mark, mark, 'safe']]))
+
+    def test_other_paths_are_not_rewritten_and_history_still_blocks(self):
+        for path in ('traces/note.txt', 'traces/nested/file.md', 'app/sample.md', 'traces/b1.md'):
+            self.put(path, ROW1_TEXT)
+        self.commit('original output')
+        rc, out = self.redact('--row-text', '--keep-sources')
+        self.assertEqual(rc, 1, out)
+        for path in ('traces/note.txt', 'traces/nested/file.md', 'app/sample.md'):
+            self.assertEqual(self.read(path), ROW1_TEXT)
+            self.put(path, 'clean')
+        self.assertEqual(self.read('traces/b1.md'), redact_labelled.PASSAGE_MARK)
+        self.commit('cleaned output')
+        rc, out = self.publish('--allow-labelled-sources')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('FAIL labelled text:', out)
+        self.no_terms(out)
+
+    def test_casefold_offsets_preserve_surrounding_text(self):
+        words = 'İstanbul has one two three four five six seven eight nine'
+        rules = prepush.Rules(runs=dict.fromkeys(prepush.grams(prepush.words(words), prepush.RUN), 0))
+        red = redact_labelled.Redactor(rules)
+        self.assertEqual(red.row_text(f'Straße. {words}! Intact.'),
+                         f'Straße. {redact_labelled.PASSAGE_MARK} Intact.')
 
 
 if __name__ == "__main__":
