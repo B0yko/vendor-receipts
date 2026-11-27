@@ -214,3 +214,14 @@ class CreditTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CorruptStateTest(unittest.TestCase):
+    def test_empty_or_torn_state_file_starts_a_fresh_window(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        b = tools.Bucket(dir=d, rpm=5)
+        for junk in ("", "{", '{"a": 1}', '[1, "x"]'):
+            with open(os.path.join(d, "bucket.json"), "w") as f:
+                f.write(junk)
+            self.assertEqual(b.try_take(), 0.0)

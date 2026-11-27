@@ -130,8 +130,11 @@ class Bucket:
             try:
                 with open(self.path) as f:
                     ts = json.load(f)
-            except FileNotFoundError:
+                if not isinstance(ts, list):
+                    ts = []
+            except (OSError, ValueError):   # missing, empty or torn state: start a fresh window, never fail the call
                 ts = []
+            ts = [t for t in ts if isinstance(t, (int, float))]
             now = time.time()
             ts = sorted(t for t in ts if t > now - WINDOW)
             wait = 0.0 if len(ts) < self.rpm else ts[-self.rpm] + WINDOW - now
