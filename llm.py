@@ -53,11 +53,17 @@ def _call(messages, temperature, max_tokens, json_mode, eps):
             if left <= 1:
                 raise LLMError("deadline exceeded: " + "; ".join(errors))
             body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+            extra = os.environ.get(f"LLM_{name.upper()}_EXTRA", "").strip()
+            if extra:  # provider extras, e.g. {"reasoning": {"effort": "xhigh"}}; reasoning models take no temperature
+                body.update(json.loads(extra))
+                if "reasoning" in body:
+                    body.pop("temperature", None)
             if json_mode:
                 body["response_format"] = {"type": "json_object"}
             t0, wait = time.time(), None
             try:
                 d = _post(url, key, body, min(timeout, left))
+                _cost_log(name, d, time.time() - t0)
                 return {"text": d["choices"][0]["message"].get("content") or "", "endpoint": name,
                         "model": d.get("model", model), "seconds": round(time.time() - t0, 2), "usage": d.get("usage")}
             except urllib.error.HTTPError as e:
@@ -76,9 +82,26 @@ def _call(messages, temperature, max_tokens, json_mode, eps):
     raise LLMError("all endpoints failed: " + "; ".join(errors))
 
 
+def _cost_log(name, d, seconds):
+    """One line per real (uncached) call into LLM_COST_LOG, if set: model, tokens, cost (OpenRouter usage.include)."""
+    path = os.environ.get("LLM_COST_LOG")
+    if not path:
+        return
+    try:
+        u = d.get("usage") or {}
+        line = {"at": time.time(), "endpoint": name, "model": d.get("model"), "seconds": round(seconds, 1),
+                "prompt": u.get("prompt_tokens"), "completion": u.get("completion_tokens"),
+                "reasoning": (u.get("completion_tokens_details") or {}).get("reasoning_tokens"), "cost": u.get("cost")}
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception:
+        pass
+
+
 def chat(messages, temperature=0, max_tokens=2000, json_mode=False, purpose="chat"):
     eps = endpoints()
-    tag = os.environ.get("LLM_CACHE_TAG") or (eps[0][2] if eps else "")
+    tag = os.environ.get("LLM_CACHE_TAG") or (eps[0][2] + os.environ.get(f"LLM_{eps[0][0].upper()}_EXTRA", "") if eps else "")
     args = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens, "json_mode": json_mode,
             "purpose": purpose, "tag": tag}
     return cache.cached("llm", args, lambda: _call(messages, temperature, max_tokens, json_mode, eps))

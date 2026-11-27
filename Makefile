@@ -2,9 +2,9 @@
 # Inputs in data/, outputs in runs/ (both untracked). PY=python3 skips uv (no packages).
 -include llm.env
 export
-PY      ?= uv run python
+PY      ?= python3
 RUN     ?= $(PY) -m app.run
-LABELS  ?= data/labels.csv
+LABELS  ?= data/hackathon_40_solutions_commented.csv
 DEV     ?= data/cases_dev.jsonl
 HOLD    ?= data/cases_holdout.jsonl
 PREDS   ?= runs/preds_dev.jsonl
@@ -12,9 +12,12 @@ GREEN   ?= runs/eval/green.json
 SMOKE   ?= tests/smoke_cases.jsonl
 CASES   ?= data/blind_cases.jsonl
 OUT     ?= runs/verdicts.jsonl
-EVALOPT ?=
+EVALOPT ?= --label overall
+WALL_CAP ?= 1200
+CONC    ?= 8
+export WALL_CAP
 
-.PHONY: check test smoke eval holdout cases green batch
+.PHONY: check test smoke eval holdout cases green batch one usage
 # check = unit tests + smoke from the cache: under 30 s. The eval runs separately (never inside a lane's loop).
 check: test smoke
 	@echo "CHECK PASSED $$(date +%H:%M) $$(git rev-parse --short HEAD 2>/dev/null)"
@@ -24,8 +27,8 @@ test:
 
 smoke:
 	@if [ ! -f $(SMOKE) ]; then echo "SKIP smoke: no $(SMOKE) yet"; exit 0; fi; mkdir -p .cache; \
-	$(KC) $(RUN) --cases $(SMOKE) --out .cache/smoke.jsonl && \
-	python3 tools/eval.py tests/smoke_labels.csv .cache/smoke.jsonl --strict --min-accuracy 1
+	RECEIPTS_FAKE=1 RUN_ID=smoke $(RUN) --cases $(SMOKE) --out .cache/smoke.jsonl && \
+	python3 tools/eval.py tests/smoke_labels.csv .cache/smoke.jsonl --label overall --strict --min-accuracy 1
 
 cases:
 	python3 tools/eval.py $(LABELS) --split dev --cases-out $(DEV) $(EVALOPT)
@@ -53,3 +56,12 @@ green:
 batch:
 	@mkdir -p $(dir $(OUT))
 	$(KC) $(RUN) --cases $(CASES) --out $(OUT) $(if $(ONLY),--only $(ONLY))
+
+# One live product end to end (D1): make one URL=https://...
+one:
+	@mkdir -p runs
+	echo '{"url": "$(URL)"}' > runs/one_case.jsonl
+	$(KC) $(RUN) --cases runs/one_case.jsonl --out runs/one.jsonl --concurrency 1
+
+usage:
+	@$(KC) $(PY) -c 'from app.research import tools; import json; print(json.dumps(tools.usage()))'
