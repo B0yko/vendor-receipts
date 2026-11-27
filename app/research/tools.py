@@ -14,6 +14,7 @@ Vendor pages go through `cache.http_get` (1 request/s per host, no logins). REPL
 import datetime, html.parser, inspect, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
 
 import cache
+from app.ledger import registrable
 
 TAVILY = os.environ.get("TAVILY_URL", "https://api.tavily.com")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -58,7 +59,8 @@ def _http_error_message(e):
     finally:
         e.close()
     try:
-        d = json.loads(body).get("detail", body)
+        j = json.loads(body)
+        d = j.get("detail") or j.get("message") or j.get("error") or body
         if isinstance(d, dict):
             d = d.get("error") or d
         return (d if isinstance(d, str) else json.dumps(d))[:300]
@@ -321,33 +323,304 @@ def fetch(url):
     return out
 
 
-# ---------------------------------------------------------------------------------------------------- L1-2 stubs
-def _stub(**kw):
-    return {**kw, "error": "not implemented"}
+# ---------------------------------------------------------------------------------------------------- open data APIs
+# Polite gap per host in seconds (cache._polite); 1 s unless named. dns.google is a public resolver built for volume.
+GAPS = {"dns.google": 0.2}
+MAX_BYTES = 40_000_000
+
+
+def _get(url, timeout=30, headers=None, tries=2, alert_on=None):
+    """Polite GET -> (final_url, text). Raises ToolError on an HTTP error or a network failure (never cached).
+    429/502/503/504 are retried once after Retry-After (capped). `alert_on`: a source name whose rate or plan limit
+    (HTTP 403/429 naming a limit) goes to runs/alerts.log."""
+    parts = urllib.parse.urlsplit(url)
+    h = {"User-Agent": cache.UA, "Accept": "application/json", **(headers or {})}
+    for attempt in range(1, tries + 1):
+        cache._polite(parts.hostname, GAPS.get(parts.hostname, 1.0))
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
+                hdrs = getattr(r, "headers", None)
+                cs = (hdrs.get_content_charset() if hdrs is not None else None) or "utf-8"
+                return r.geturl(), r.read(MAX_BYTES).decode(cs, "replace")
+        except urllib.error.HTTPError as e:
+            msg = _http_error_message(e)
+            if alert_on and e.code in (403, 429) and re.search(r"rate limit|quota|limit exceeded", msg, re.I):
+                alert(alert_on, parts.path or "/", e.code, msg)
+                raise ToolError(f"{parts.hostname} HTTP {e.code} {msg[:200]}")
+            if e.code in (429, 502, 503, 504) and attempt < tries:
+                time.sleep(_retry_after(e.headers, attempt))
+                continue
+            raise ToolError(f"{parts.hostname} HTTP {e.code} {msg[:200]}")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            raise ToolError(f"{parts.hostname}: {type(e).__name__}: {e}"[:300])
+    raise ToolError(f"{parts.hostname}: retries exhausted")
+
+
+def _get_json(url, **kw):
+    final, text = _get(url, **kw)
+    try:
+        return json.loads(text) if text.strip() else None
+    except ValueError:
+        raise ToolError(f"{urllib.parse.urlsplit(url).hostname}: answer is not JSON: {text[:120]!r}")
+
+
+def _day(v):
+    """'2023-05-01T12:00:00Z' | '20230501123456' | epoch -> 'YYYY-MM-DD' ('' when unknown)."""
+    if v in (None, ""):
+        return ""
+    if isinstance(v, (int, float)):
+        return datetime.datetime.fromtimestamp(v, datetime.timezone.utc).strftime("%Y-%m-%d")
+    v = str(v).strip()
+    if re.fullmatch(r"\d{8,14}", v):
+        return f"{v[:4]}-{v[4:6]}-{v[6:8]}"
+    m = re.match(r"(\d{4})-(\d\d)-(\d\d)", v)
+    return "-".join(m.groups()) if m else ""
+
+
+def _host(v):
+    v = str(v or "").strip()
+    return (urllib.parse.urlsplit(v if "://" in v else "https://" + v).hostname or "").lower().rstrip(".")
+
+
+def _ts(v):
+    """'2023', '2023-05-01', '20230501' -> digits of a Wayback timestamp (1-14)."""
+    return re.sub(r"\D", "", str(v or ""))[:14]
+
+
+def _archive_url(ts, original):
+    return f"https://web.archive.org/web/{ts}/{original}"
 
 
 def wayback(url, limit=200):
-    return _stub(url=url, first=None, last=None, count=0, snapshots=[])
+    """Wayback CDX, one capture per month -> {"url", "first", "last" ('YYYY-MM-DD'), "count", "snapshots":
+    [{"timestamp" (14 digits), "url" (the archive URL), "status"}], "error"}. When the monthly list reaches `limit`,
+    one more query fetches the true latest capture (flag "truncated")."""
+    out = {"url": url, "first": None, "last": None, "count": 0, "snapshots": [], "error": None}
+    try:
+        target = str(url or "").strip()
+        if not target:
+            raise ToolError("no url")
+        n = max(1, min(int(limit), 1000))
+        q = {"url": target, "output": "json", "fl": "timestamp,original,statuscode", "collapse": "timestamp:6",
+             "limit": n}
+
+        def call():
+            rows = _get_json("https://web.archive.org/cdx/search/cdx?" + urllib.parse.urlencode(q), timeout=40) or []
+            snaps = [{"timestamp": r[0], "url": _archive_url(r[0], r[1]), "status": r[2]}
+                     for r in rows[1:] if isinstance(r, list) and len(r) >= 3]
+            last = snaps[-1]["timestamp"] if snaps else None
+            if len(snaps) >= n:
+                lq = {"url": target, "output": "json", "fl": "timestamp,original,statuscode", "limit": -1}
+                tail = _get_json("https://web.archive.org/cdx/search/cdx?" + urllib.parse.urlencode(lq),
+                                 timeout=40) or []
+                if len(tail) > 1 and tail[-1]:
+                    last = max(last, tail[-1][0])
+            return {"snapshots": snaps, "last": last, "truncated": len(snaps) >= n}
+        d = cache.cached("wayback", q, call)
+        snaps = d["snapshots"]
+        out.update(snapshots=snaps, count=len(snaps), truncated=d["truncated"],
+                   first=_day(snaps[0]["timestamp"]) if snaps else None, last=_day(d["last"]) or None)
+    except Exception as e:
+        out["error"] = _short(e)
+    return out
 
 
 def wayback_get(url, timestamp):
-    return _stub(url=url, timestamp=timestamp, text="")
+    """The archived page nearest `timestamp` -> {"url" (the archive URL of the capture), "timestamp" (14 digits of the
+    capture), "text" (as in fetch), "title", "error"}."""
+    ts = _ts(timestamp)
+    out = {"url": url, "timestamp": ts, "text": "", "title": "", "error": None}
+    try:
+        target = str(url or "").strip()
+        if not target or not ts:
+            raise ToolError("need url and timestamp (YYYYMMDD)")
+
+        def call():
+            final, body = _get(f"https://web.archive.org/web/{ts}id_/{target}", timeout=40,
+                               headers={"Accept": "text/html,*/*;q=0.8"})
+            m = re.search(r"/web/(\d{4,14})(?:id_)?/", final)
+            got = m.group(1) if m else ts
+            page = html_to_text(body, target)
+            return {"url": _archive_url(got, target), "timestamp": got, "title": page["title"],
+                    "text": page["text"][:TEXT_CAP]}
+        out.update(cache.cached("wayback_get", {"url": target, "timestamp": ts}, call))
+    except Exception as e:
+        out["error"] = _short(e)
+    return out
+
+
+_RCODES = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 5: "REFUSED"}
+
+
+def _doh(name, rtype):
+    q = {"name": name, "type": rtype}
+
+    def call():
+        d = _get_json("https://dns.google/resolve?" + urllib.parse.urlencode(q), timeout=15) or {}
+        if d.get("Status") == 2:
+            raise ToolError(f"dns {name} {rtype}: SERVFAIL")
+        return d
+    return cache.cached("dns", q, call)
 
 
 def dns(host):
-    return _stub(host=host, a=[], aaaa=[], cname=[], ns=[])
+    """DNS over HTTPS (dns.google) -> {"host", "a", "aaaa", "cname" (the chain), "ns" (of the registrable domain when
+    the host has none), "rcode" ("NXDOMAIN" = the host does not exist: an answer, not an error), "error"}."""
+    h = _host(host)
+    out = {"host": h, "a": [], "aaaa": [], "cname": [], "ns": [], "rcode": None, "error": None}
+    try:
+        if not h:
+            raise ToolError("no host")
+        types = {1: "a", 28: "aaaa", 5: "cname", 2: "ns"}
+        for rtype in ("A", "AAAA", "NS"):
+            d = _doh(h, rtype)
+            if rtype == "A":
+                out["rcode"] = _RCODES.get(d.get("Status"), str(d.get("Status")))
+            for ans in d.get("Answer") or []:
+                k = types.get(ans.get("type"))
+                v = str(ans.get("data", "")).rstrip(".")
+                if k and v and v not in out[k]:
+                    out[k].append(v)
+        apex = registrable(h)
+        if not out["ns"] and apex and apex != h:
+            out["ns"] = [str(a.get("data", "")).rstrip(".") for a in _doh(apex, "NS").get("Answer") or []
+                         if a.get("type") == 2]
+    except Exception as e:
+        out["error"] = _short(e)
+    return out
 
 
 def crtsh(domain):
-    return _stub(domain=domain, names=[], first_seen=None, count=0)
+    """Certificate-transparency names under the domain (crt.sh) -> {"domain", "names" (deduped, sorted, cap 300),
+    "first_seen" (earliest not_before, 'YYYY-MM-DD'), "count" (distinct names before the cap), "error"}."""
+    d = _host(domain).removeprefix("www.")
+    out = {"domain": d, "names": [], "first_seen": None, "count": 0, "error": None}
+    try:
+        if not d:
+            raise ToolError("no domain")
+
+        def call():
+            rows = _get_json(f"https://crt.sh/?q=%25.{urllib.parse.quote(d)}&output=json", timeout=40) or []
+            names, first = set(), None
+            for r in rows:
+                for n in str(r.get("name_value", "")).lower().split("\n"):
+                    n = n.strip().removeprefix("*.")
+                    if n and (n == d or n.endswith("." + d)):
+                        names.add(n)
+                nb = _day(r.get("not_before"))
+                if nb and (first is None or nb < first):
+                    first = nb
+            return {"names": sorted(names), "first_seen": first, "certs": len(rows)}
+        r = cache.cached("crtsh", {"domain": d}, call)
+        out.update(names=r["names"][:300], count=len(r["names"]), first_seen=r["first_seen"], certs=r["certs"])
+    except Exception as e:
+        out["error"] = _short(e)
+    return out
+
+
+def _pypi(name):
+    d = _get_json(f"https://pypi.org/pypi/{urllib.parse.quote(name)}/json")
+    latest = d["info"]["version"]
+    times = {v: min((f.get("upload_time_iso_8601") or f.get("upload_time") or "") for f in fs)
+             for v, fs in (d.get("releases") or {}).items() if fs}
+    return {"latest": latest, "latest_date": _day(times.get(latest)), "first_date": _day(min(times.values(), default="")),
+            "url": f"https://pypi.org/project/{name}/"}
+
+
+def _npm(name):
+    d = _get_json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"))
+    latest = (d.get("dist-tags") or {}).get("latest", "")
+    t = d.get("time") or {}
+    return {"latest": latest, "latest_date": _day(t.get(latest)), "first_date": _day(t.get("created")),
+            "url": f"https://www.npmjs.com/package/{name}"}
+
+
+def _crates(name):
+    d = _get_json(f"https://crates.io/api/v1/crates/{urllib.parse.quote(name)}")
+    c = d.get("crate") or {}
+    latest = c.get("max_stable_version") or c.get("newest_version") or c.get("max_version") or ""
+    ld = next((v.get("created_at") for v in d.get("versions") or [] if v.get("num") == latest), c.get("updated_at"))
+    return {"latest": latest, "latest_date": _day(ld), "first_date": _day(c.get("created_at")),
+            "url": f"https://crates.io/crates/{name}"}
+
+
+def _packagist(name):
+    d = _get_json(f"https://packagist.org/packages/{urllib.parse.quote(name, safe='/')}.json")
+    p = d.get("package") or {}
+    vers = [v for k, v in (p.get("versions") or {}).items() if not k.startswith("dev-") and "-dev" not in k]
+    stable = [v for v in vers if not re.search(r"(alpha|beta|rc)", v.get("version", ""), re.I)] or vers
+    top = max(stable, key=lambda v: v.get("time") or "", default={})
+    times = [v.get("time") for v in vers if v.get("time")]
+    return {"latest": top.get("version", ""), "latest_date": _day(top.get("time")),
+            "first_date": _day(min(times, default="") or p.get("time")), "url": f"https://packagist.org/packages/{name}"}
+
+
+def _rubygems(name):
+    vs = _get_json(f"https://rubygems.org/api/v1/versions/{urllib.parse.quote(name)}.json") or []
+    top = next((v for v in vs if not v.get("prerelease")), vs[0] if vs else {})
+    return {"latest": top.get("number", ""), "latest_date": _day(top.get("created_at")),
+            "first_date": _day(min((v.get("created_at") or "" for v in vs), default="")),
+            "url": f"https://rubygems.org/gems/{name}"}
+
+
+REGISTRIES = {"pypi": _pypi, "npm": _npm, "crates": _crates, "packagist": _packagist, "rubygems": _rubygems}
 
 
 def registry(name, ecosystem):
-    return _stub(name=name, ecosystem=ecosystem, latest=None, latest_date=None, first_date=None, url=None)
+    """A package on pypi, npm, crates, packagist or rubygems -> {"name", "ecosystem", "latest", "latest_date",
+    "first_date" ('YYYY-MM-DD'), "url" (the registry page), "error"}."""
+    eco = str(ecosystem or "").lower().strip()
+    eco = {"pip": "pypi", "python": "pypi", "node": "npm", "cargo": "crates", "crates.io": "crates", "rust": "crates",
+           "composer": "packagist", "php": "packagist", "gem": "rubygems", "ruby": "rubygems"}.get(eco, eco)
+    name = str(name or "").strip()
+    out = {"name": name, "ecosystem": eco, "latest": None, "latest_date": None, "first_date": None, "url": None,
+           "error": None}
+    try:
+        if eco not in REGISTRIES:
+            raise ToolError(f"unknown ecosystem {ecosystem!r}; one of {', '.join(REGISTRIES)}")
+        if not name:
+            raise ToolError("no package name")
+        r = cache.cached("registry", {"name": name, "ecosystem": eco}, lambda: REGISTRIES[eco](name))
+        out.update({k: (r.get(k) or None) for k in ("latest", "latest_date", "first_date", "url")})
+    except Exception as e:
+        out["error"] = _short(e)
+    return out
 
 
 def github(owner_repo):
-    return _stub(repo=owner_repo, pushed_at=None, stars=None, archived=None, license=None, open_issues=None, url=None)
+    """GitHub repository facts (REST, unauthenticated unless GITHUB_TOKEN is set: 60 requests/hour) -> {"repo",
+    "pushed_at", "created_at" ('YYYY-MM-DD'), "stars", "archived", "license" (SPDX id), "open_issues", "url",
+    "error"}."""
+    v = str(owner_repo or "").strip()
+    path = v.split("github.com", 1)[1] if "github.com" in v else v
+    parts = [x for x in re.split(r"[/:]", path.split("?")[0].split("#")[0]) if x][:2]
+    ok = len(parts) == 2 and all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) for x in parts)
+    repo = f"{parts[0]}/{parts[1].removesuffix('.git')}" if ok else v
+    out = {"repo": repo, "pushed_at": None, "created_at": None, "stars": None, "archived": None, "license": None,
+           "open_issues": None, "url": None, "error": None}
+    try:
+        if not ok:
+            raise ToolError(f"not owner/repo: {v!r}")
+        hdr = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        if os.environ.get("GITHUB_TOKEN"):
+            hdr["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
+
+        def call():
+            d = _get_json(f"https://api.github.com/repos/{repo}", headers=hdr, alert_on="github")
+            return {"repo": d.get("full_name") or repo, "pushed_at": _day(d.get("pushed_at")),
+                    "created_at": _day(d.get("created_at")), "stars": d.get("stargazers_count"),
+                    "archived": d.get("archived"), "license": (d.get("license") or {}).get("spdx_id"),
+                    "open_issues": d.get("open_issues_count"), "url": d.get("html_url")}
+        out.update(cache.cached("github", {"repo": repo.lower()}, call))
+    except Exception as e:
+        out["error"] = _short(e)
+    return out
+
+
+def research(query):
+    """Tavily /research. Not available: the docs pack (data/docs/tavily-llms.txt) names the endpoint but documents
+    no request or response fields, so the call would be a guess; the loop uses search + extract instead."""
+    return {"report": "", "sources": [], "error": "not available"}
 
 
 # ---------------------------------------------------------------------------------------------------- the registry
