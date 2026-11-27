@@ -234,6 +234,81 @@ class TestSaysIt(Base):
         self.assertTrue(r["why"].startswith("no verdict"), r["why"])
 
 
+class TestSaysItLevels(Base):
+    """L6-4: the model sees title, published date and date; "partial" keeps with a note; dates never reject."""
+    URL = "https://news.example.org/deal"
+    DEAL = "Globex has acquired Acme Analytics, the companies announced on Tuesday."
+
+    def items(self, user):
+        return {json.loads(x)["id"]: json.loads(x) for x in user.splitlines() if x.startswith("{")}
+
+    def test_partial_is_kept_with_note(self):
+        model.set_fake("says_it", lambda s, u: {"results": [{"id": "e1", "supports": "partial",
+                                                             "why": "acquisition stated", "missing": "the price of $40m"}]})
+        r = self.one(ev(1, self.URL, "Globex has acquired Acme Analytics", text="Globex bought Acme Analytics for $40m."),
+                     {self.URL: src(self.DEAL)})
+        self.assertTrue(r["checks"]["says_it"] and r["kept"], r["why"])
+        self.assertEqual(r["why"], "")
+        self.assertEqual(r["says_it_note"], "partial: the price of $40m")
+        for k in ("_src_title", "_src_pub", "_says_why"):
+            self.assertNotIn(k, r)
+
+    def test_full_support_has_empty_note(self):
+        r = self.one(ev(1, self.URL, "Globex has acquired Acme Analytics"), {self.URL: src(self.DEAL)})
+        self.assertTrue(r["kept"])
+        self.assertEqual(r["says_it_note"], "")
+
+    def test_date_only_gap_no_longer_rejects(self):
+        seen = []
+
+        def fake(system, user):
+            """Supports when the claim's year is in the quote or in the date fields given; else rejects on the date."""
+            out = []
+            for i, it in self.items(user).items():
+                seen.append(it)
+                year = "2017"
+                ok = any(year in str(it.get(k, "")) for k in ("quote", "date", "published_date", "source_title"))
+                out.append({"id": i, "supports": ok, "why": "" if ok else "the 2017 date is not in the quote"})
+            return {"results": out}
+        model.set_fake("says_it", fake)
+        claim = "In 2017 Globex acquired Acme Analytics."
+        evs = [ev(1, self.URL, "Globex has acquired Acme Analytics", text=claim),
+               ev(2, "https://news.example.org/deal2", "Globex has acquired Acme Analytics", text=claim, date="2017-05"),
+               ev(3, "https://news.example.org/deal3", "Globex has acquired Acme Analytics", text=claim)]
+        srcs = {self.URL: src(self.DEAL, published_date="2017-05-02T08:00:00Z"),
+                "https://news.example.org/deal2": src(self.DEAL),
+                "https://news.example.org/deal3": src(self.DEAL, title="Globex buys Acme (2017)")}
+        out = rc.check(research(evs, srcs))
+        self.assertEqual([r["kept"] for r in out], [True, True, True], [r["why"] for r in out])
+        self.assertEqual(seen[0]["published_date"], "2017-05-02T08:00:00Z")
+        self.assertEqual(seen[0]["date"], "2017-05-02", "the date field is filled before the model is asked")
+        self.assertEqual(seen[1]["date"], "2017-05")
+        self.assertEqual(seen[2]["source_title"], "Globex buys Acme (2017)")
+        self.assertEqual(set(seen[0]), {"id", "claim", "quote", "source_title", "published_date", "date", "url"})
+
+    def test_prompt_rules(self):
+        for phrase in ("central assertion", "dated check owns them", "widely used", '"partial"', "states the opposite",
+                       "another product or company"):
+            self.assertIn(phrase, rc.SYSTEM)
+
+    def test_opposite_still_rejects(self):
+        model.set_fake("says_it", lambda s, u: {"results": [{"id": "e1", "supports": False,
+                                                             "why": "the quote states the opposite"}]})
+        r = self.one(ev(1, self.URL, "Globex has acquired Acme Analytics", text="Acme Analytics stayed independent."),
+                     {self.URL: src(self.DEAL)})
+        self.assertFalse(r["checks"]["says_it"] or r["kept"])
+        self.assertEqual(r["why"], "says it failed: the quote states the opposite")
+        self.assertEqual(r["says_it_note"], "")
+
+    def test_answer_words(self):
+        for sup, kept in ((True, True), ("true", True), ("Partial", True), ("false", False), (None, False),
+                          ("maybe", False), (1, False)):
+            model.set_fake("says_it", lambda s, u, sup=sup: {"results": [{"id": "e1", "supports": sup}]})
+            r = self.one(ev(1, self.URL, "Globex has acquired Acme Analytics"), {self.URL: src(self.DEAL)})
+            self.assertEqual(r["kept"], kept, sup)
+            self.assertEqual(bool(r["says_it_note"]), sup == "Partial", sup)
+
+
 class TestDated(Base):
     URL = "https://news.example.org/a"
 
@@ -288,7 +363,8 @@ class TestShapeAndBadData(Base):
     def test_receipt_shape(self):
         r = self.one(ev(1, "https://news.example.org/a", "will end on 31 March 2026"),
                      {"https://news.example.org/a": src(PAGE)})
-        for k in ("checks", "kept", "why", "domain", "independent", "dup_of", "id", "quote", "url", "category"):
+        for k in ("checks", "kept", "why", "domain", "independent", "dup_of", "says_it_note", "id", "quote", "url",
+                  "category"):
             self.assertIn(k, r)
         self.assertEqual(set(r["checks"]), {"resolves", "same_company", "says_it", "dated"})
         self.assertEqual(ledger.validate_evidence(r), [])
