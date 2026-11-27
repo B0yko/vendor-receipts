@@ -201,10 +201,7 @@ def new_research(url):
             "matrix": {str(k): {"status": "open", "queries": [], "sources": [], "evidence": [], "note": ""}
                        for k in CATEGORIES},
             "claim_checks": [], "evidence": [], "sources": {}, "sources_failed": [], "rounds": [],
-            "stats": {"tool_calls": 0, "llm_calls": 0, "capped": False},
-   "disconfirmation": {"targets", "queries", "outcomes": [{"target", "outcome": "survived|weakened|refuted", "why",
-                       "evidence"}], "seconds"} | {"skipped": "..."}   (added by app/check/disconfirm.py, optional)}
-  deadline arguments everywhere are time.time() values.
+            "stats": {"tool_calls": 0, "llm_calls": 0, "capped": False}}
 
 
 def slug(url):
