@@ -8,6 +8,8 @@
 #   tools/blind.sh ship         redact labelled-set sources unless ALLOW_LABELLED=1, commit stackgini-verdicts.csv and
 #                               traces/, push main through the pre-push guard (never --no-verify).
 #   tools/blind.sh flip         full-history publish check, then the visibility flip only on PASS.
+# The run splits the products by row parity into two processes: half a on Tavily key KEY_A (tavily-api-key), half b
+# on KEY_B (tavily-api-key-2), each with its own limiter bucket at TAVILY_RPM (95); then ONE submission is rebuilt.
 # Env: TAG (blind-run), SUBMIT (the main checkout), WALL_CAP (1380), CONC (10), MODEL_GLOBAL_CONC (40), ALLOW_LABELLED
 # (default 1, Andrii 17:54: labelled-set names and domains allowed only in stackgini-verdicts.csv and traces/ as our own
 # research citations; labelled row texts stay blocked everywhere; ALLOW_LABELLED=0 redacts instead).
@@ -30,13 +32,44 @@ worktree() {
   echo "blind: worktree $W at $(git -C "$W" rev-parse --short HEAD) ($TAG)"
 }
 
-batch() {  # $1 cases, $2 out, $3 extra make args
+batch() {  # $1 cases, $2 out, $3 tavily key item, $4 limiter dir, $5 extra make args; no --submit (rebuilt after)
   cd "$W"
-  # the blind batch has its own Tavily key (llm.env KC: tavily-api-key-2) and so its own 100 RPM and limiter state
-  TAVILY_RPM="${TAVILY_RPM:-98}" TAVILY_RL_DIR="${TAVILY_RL_DIR:-/tmp/vendor-receipts-tavily-rl-blind}" \
-  make batch CASES="$1" OUT="$2" SUBMIT="$SUBMIT" RUN_ID="${RUN_ID:-blind}" CONC="${CONC:-10}" \
+  TAVILY_RPM="${TAVILY_RPM:-95}" TAVILY_RL_DIR="$4" \
+  make batch CASES="$1" OUT="$2" RUN_ID="${RUN_ID:-blind}" CONC="${CONC:-10}" \
     MODEL_CONC="${MODEL_GLOBAL_CONC:-40}" MODEL_GLOBAL_CONC="${MODEL_GLOBAL_CONC:-40}" WALL_CAP="${WALL_CAP:-1380}" \
-    JUDGE_RESERVE="${JUDGE_RESERVE:-600}" SINGLE_VIEW_BELOW="${SINGLE_VIEW_BELOW:-420}" ${3:-}
+    JUDGE_RESERVE="${JUDGE_RESERVE:-600}" SINGLE_VIEW_BELOW="${SINGLE_VIEW_BELOW:-420}" \
+    KC="kc env TAVILY_API_KEY=$3 LLM_OR_KEY=openrouter-api-key --" SUBMIT= ${5:-}
+}
+
+halves() {  # $1 csv -> runs/blind_half_a.csv, runs/blind_half_b.csv (rows by parity, header kept); any input format
+  python3 - "$1" <<'PY'
+import sys, os
+src = sys.argv[1]
+lines = open(src, encoding="utf-8-sig").read().splitlines(keepends=True)
+csv_like = src.endswith(".csv")
+head, rows = (lines[:1], lines[1:]) if csv_like else ([], lines)
+if csv_like:  # quoted multi-line fields: split by parsed records, not by lines
+    import csv, io
+    recs = list(csv.reader(io.StringIO("".join(rows))))
+    out = []
+    for r in recs:
+        b = io.StringIO(); csv.writer(b, lineterminator="\n").writerow(r); out.append(b.getvalue())
+    rows = out
+rows = [r for r in rows if r.strip()]
+ext = ".csv" if csv_like else ".jsonl"
+for name, part in (("a", rows[0::2]), ("b", rows[1::2])):
+    with open(f"runs/blind_half_{name}{ext}", "w") as f:
+        f.writelines(head + part)
+print(f"halves: {len(rows[0::2])} + {len(rows[1::2])} of {len(rows)}")
+PY
+}
+
+rebuild() {  # $1 csv: one submission from every verdict line so far (the last non-error line per id wins)
+  cd "$W"
+  : > runs/verdicts.jsonl
+  for f in runs/verdicts_a.jsonl runs/verdicts_b.jsonl runs/rerun.jsonl; do [ -f "$f" ] && cat "$f" >> runs/verdicts.jsonl; done
+  echo "blind: rebuild from $(wc -l < runs/verdicts.jsonl | tr -d ' ') verdict lines"
+  python3 -m app.run --cases "$1" --from-jsonl runs/verdicts.jsonl --submit "$SUBMIT"
 }
 
 case ${1:-} in
@@ -46,23 +79,28 @@ case ${1:-} in
     worktree
     [ -e "$W/$CSV" ] || die "$W/$CSV not visible (data/ link)"
     mkdir -p "$SUBMIT"
-    batch "$CSV" "${OUT:-runs/verdicts.jsonl}"
+    rm -f "$W"/runs/verdicts_a.jsonl "$W"/runs/verdicts_b.jsonl "$W"/runs/rerun.jsonl "$W"/runs/verdicts.jsonl
+    (cd "$W" && halves "$CSV")
+    ext=${CSV##*.}; [ "$ext" = csv ] || ext=jsonl
+    # two processes, two Tavily accounts, two limiter buckets (Andrii 18:30: ~2 x 95 RPM)
+    (batch "runs/blind_half_a.$ext" runs/verdicts_a.jsonl "${KEY_A:-tavily-api-key}" /tmp/vr-rl-key1 > "$W/runs/blind_a.log" 2>&1) &
+    (batch "runs/blind_half_b.$ext" runs/verdicts_b.jsonl "${KEY_B:-tavily-api-key-2}" /tmp/vr-rl-key2 > "$W/runs/blind_b.log" 2>&1) &
+    wait
+    tail -2 "$W/runs/blind_a.log" "$W/runs/blind_b.log"
+    rebuild "$CSV"
     echo "blind: done; next: tools/blind.sh ship (failed ids: tools/blind.sh rerun id1,id2)"
     ;;
   rerun)
     [ -n "${2:-}" ] || die "rerun needs ids"
     CSV=${CSV:-data/blind.csv}
     worktree
-    RUN_ID=${RUN_ID:-blind-rerun} batch "$CSV" runs/rerun.jsonl "ONLY=$2"
-    # the rerun's export holds only the rerun ids: rebuild the full submission (the last non-error line per id wins)
-    cat runs/verdicts.jsonl runs/rerun.jsonl > runs/verdicts_all.jsonl
-    python3 -m app.run --cases "$CSV" --from-jsonl runs/verdicts_all.jsonl --submit "$SUBMIT"
-    echo "blind: submission rebuilt from runs/verdicts_all.jsonl"
+    RUN_ID=${RUN_ID:-blind-rerun} batch "$CSV" runs/rerun.jsonl "${KEY_B:-tavily-api-key-2}" /tmp/vr-rl-key2 "ONLY=$2"
+    rebuild "$CSV"
+    echo "blind: submission rebuilt from runs/verdicts.jsonl"
     ;;
   rebuild)
-    CSV=${2:-data/blind.csv}
-    worktree; cd "$W"
-    python3 -m app.run --cases "$CSV" --from-jsonl "${OUT:-runs/verdicts.jsonl}" --submit "$SUBMIT"
+    worktree
+    rebuild "${2:-data/blind.csv}"
     ;;
   ship)
     cd "$M"
