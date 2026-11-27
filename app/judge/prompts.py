@@ -44,6 +44,13 @@ one color and write what the website does not show: flags with receipts, the rea
 
 The call for the buyer: Green = shortlist; Yellow = shortlist after a named check; Red = do not shortlist.
 
+Severity is yours to set from the receipts; the research severity is a first guess. A contradicted key claim is
+critical: a claim the buyer's decision rests on (certifications or audits presented as the vendor's own, where the data
+is hosted, whether the product exists, is mature or is still sold, named customers, the legal entity) that a kept
+receipt shows to be false. Proof borrowed from someone else (another company's certificate, logos, testimonials or
+screenshots shown as the vendor's own), or several contradicted claims on one site, is fabricated proof: critical. A
+small team, an old design or few public mentions is not a contradiction and is never critical on its own.
+
 What you see in the user message:
 - IDENTITY: who the product and the vendor are (vendor, legal entity, parent, former names, domains, same-name risks).
 - SITE: the vendor's own story: core promise, segment, claims (c1, c2, ...), inconsistencies, site signals.
