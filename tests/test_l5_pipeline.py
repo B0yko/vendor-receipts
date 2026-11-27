@@ -600,6 +600,32 @@ class TestCapAuditSteps(Base):
         self.assertIn("audit not reached", open(os.path.join(rd, "trace.md")).read())
 
 
+class TestSaysItNoteAndCallCounts(Base):
+    def test_says_it_note_in_flag_receipts_and_appendix(self):
+        r = fixture("example-org")
+        rc = stub_check(r)
+        rc[2]["says_it_note"] = "partial: the date of the interview"  # e3, the yellow flag's receipt
+        md = trace.render(r, rc, stub_judge(r, rc))
+        note = "says_it yes (partial: the date of the interview) dated yes"
+        flag = md.split("### Yellow flags")[1].split("### Green flags")[0]
+        self.assertIn(f"  - Receipt e3: https://dev.example.net/acme-notes-maintainer · 2026-10-08 · trade_press · "
+                      f"checks: resolves yes same_company yes {note}", flag)
+        appendix = md.split("### e3:")[1]
+        self.assertIn(f"- Checks: resolves yes same_company yes {note}", appendix)
+        self.assertEqual(md.count("(partial:"), 2)  # e2 has no note: nothing next to its says_it
+        self.assertNotIn("says_it yes ()", md)
+
+    def test_header_labels_research_model_calls(self):
+        r = fixture("example-com")
+        rc = stub_check(r)
+        md = trace.render(r, rc, stub_judge(r, rc))
+        self.assertIn("· tool calls: 3 · research model calls: 3\n", md)
+        self.assertIn("research model calls 3, sources read", md)
+        self.assertNotIn("· model calls:", md)
+        md = trace.render(r, rc, stub_judge(r, rc) | {"stats": {"model_calls": 11}})
+        self.assertIn("· research model calls: 3 · all model calls: 11\n", md)
+
+
 class TestCli(Base):
     def test_run_prints_color_and_trace(self):
         out = io.StringIO()
