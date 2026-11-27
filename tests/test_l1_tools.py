@@ -41,7 +41,8 @@ class Base(unittest.TestCase):
                   mock.patch.object(tools, "CREDITS_LOG", os.path.join(self.dir, "runs", "tavily_credits.jsonl")),
                   mock.patch.dict(os.environ, {"TAVILY_API_KEY": "test-key", "TAVILY_RPM": "90",
                                                "TAVILY_RL_DIR": os.path.join(self.dir, "rl")}),
-                  mock.patch("sys.stderr", io.StringIO())):
+                  mock.patch("sys.stderr", io.StringIO()),
+                  mock.patch.object(tools.time, "sleep")):  # retries back off; tests never really sleep
             p.start()
             self.addCleanup(p.stop)
         os.environ.pop("REPLAY", None)
@@ -114,6 +115,11 @@ class TavilyTests(Base):
         self.script(urllib.error.URLError("no route"))
         r = tools.search("q")
         self.assertIn("URLError", r["error"])
+
+    def test_connection_refused_is_retried(self):
+        self.script(urllib.error.URLError("refused"), SEARCH_OK)
+        r = tools.search("q2")
+        self.assertIsNone(r["error"])
 
     def test_no_key(self):
         os.environ.pop("TAVILY_API_KEY")

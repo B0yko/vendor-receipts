@@ -247,7 +247,16 @@ def _tavily(endpoint, body=None, timeout=60, deadline=None):
                 raise ToolError(f"{last} (no retry after {attempt} tries: waiting {wait:.0f} s more goes past the "
                                 f"deadline or the {MAX_WAIT:.0f} s wait cap)")
             raise ToolError(last + (f" after {attempt} tries" if attempt > 1 else ""))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # connection refused or reset, DNS hiccup, timeout: transient under load (387 such failures in dev2,
+            # none retried); back off and retry like a 5xx, never record it as a signal
+            last = f"tavily {name}: {type(e).__name__}: {e}"[:300]
+            if attempt < TAVILY_TRIES:
+                wait = min(2.0 ** attempt, 16.0) * (0.75 + 0.5 * (time.time() % 1))
+                if budget.sleep(wait):
+                    continue
+            raise ToolError(last + (f" after {attempt} tries" if attempt > 1 else ""))
+        except ValueError as e:
             raise ToolError(f"tavily {name}: {type(e).__name__}: {e}"[:300])
     raise ToolError(f"tavily {name}: retries exhausted ({last})")
 
