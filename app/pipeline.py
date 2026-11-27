@@ -87,7 +87,7 @@ def disconfirmation(research, receipts, deadline=None):
 
 
 STEPS = ("research", "check", "disconfirm", "judge", "audit")
-SINGLE_VIEW_BELOW = int(os.environ.get("SINGLE_VIEW_BELOW", 420))  # seconds left at judge time under which the judge runs one view (a view takes 80-110 s)
+SINGLE_VIEW_BELOW = int(os.environ.get("SINGLE_VIEW_BELOW", 300))  # seconds left at judge time under which the judge runs one view (a view takes 80-110 s)
 
 
 def judge_views(deadline, now=None):
