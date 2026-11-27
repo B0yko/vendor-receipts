@@ -1,0 +1,4 @@
+[
+  {"id": "F1", "desc": "Walking skeleton: case url -> fetch through cache.py -> verdict JSON line with one linked reason", "check": "make smoke", "passes": false},
+  {"id": "F2", "desc": "Eval wired: dev split scored by tools/eval.py, first number in STATE.md", "check": "make eval", "passes": false}
+]

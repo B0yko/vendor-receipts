@@ -1,0 +1,6 @@
+[project]
+name = "vendor-receipts"
+version = "0.1.0"
+description = "Built at AI Agents Berlin, 27.11.2026"
+requires-python = ">=3.12"
+dependencies = ["httpx", "openai", "tavily-python", "tldextract"]

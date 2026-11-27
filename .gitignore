@@ -1,0 +1,16 @@
+# secrets and local config
+.env
+*.env
+!*.env.example
+llm.env
+# event data: labelled examples, blind cases (data/), verdicts, manifests, eval outputs (runs/), cached calls.
+# No trailing slash: lane B's worktree has data and .cache as symlinks, and "data/" would not ignore a symlink.
+/data
+/runs
+/.cache
+.venv/
+# process notes (account and model names stay out of the public repo)
+STATE.md
+__pycache__/
+*.pyc
+.DS_Store

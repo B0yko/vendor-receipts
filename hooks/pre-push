@@ -1,0 +1,4 @@
+#!/bin/sh
+# Blocks a push that leaks event data or carries an AI attribution line. Enabled by tools/bootstrap.sh
+# (git config core.hooksPath hooks). Manual run: python3 tools/prepush.py
+exec python3 "$(git rev-parse --show-toplevel)/tools/prepush.py" --hook "$@"
