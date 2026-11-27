@@ -19,9 +19,12 @@ What it does: see SPEC.md (goal, done checks D1..Dn, out of scope). Plan state: 
   before the event. The `openai` SDK with the same LLM_* env is fine too; keep every call cached.
 - `tests/`: unit tests; `tests/smoke_cases.jsonl` and `tests/smoke_labels.csv` hold public, non-event examples only.
 - `data/` (inputs: labelled examples, blind cases) and `runs/` (verdicts, manifests, eval outputs): not tracked;
-  event data stays in the event. `hooks/pre-push` runs `tools/prepush.py` on every pushed commit: labelled-set rows, domains and names are blocked
-  everywhere; blind-product domains only in `stackgini-verdicts.csv` and `traces/`. `tools/publish_check.py` runs the same
-  rules over the whole history before the repo goes public (`--flip` only on PASS).
+  event data stays in the event. `hooks/pre-push` runs `tools/prepush.py` on every pushed commit:
+  labelled-set domains, names and row text, blind domains outside `stackgini-verdicts.csv` and `traces/`, private paths,
+  tokens and attribution all block the push. In those two places labelled domains and names are `labelled-source`:
+  FAIL by default; `python3 tools/redact_labelled.py` withholds them before the commit; `PREPUSH_ALLOW_LABELLED_SOURCES=1`
+  (hook) or `--allow-labelled-sources` (publish check) lets them pass as INFO. Before the visibility flip:
+  `python3 tools/publish_check.py [--allow-labelled-sources] --flip` checks the full history and flips only on PASS.
 - `.cache/`: cached external calls. Not tracked.
 - Lanes: each lane edits only its own paths (SPEC.md § Lanes); shared files change only through Lead or Andrii.
 
