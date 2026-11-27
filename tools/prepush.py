@@ -4,6 +4,7 @@
   prepush.py --hook        as .git hook (hooks/pre-push; git's "<lref> <lsha> <rref> <rsha>" lines on stdin): every
                            commit the push adds (tree, paths, message)
   prepush.py [--rev REV]   REV (default HEAD) and its whole history; exit 1 on any finding
+  --allow-labelled-sources or env PREPUSH_ALLOW_LABELLED_SOURCES=1: "labelled-source" findings (below) pass as INFO
 
 Rules (load_rules + scan; publish_check.py runs the same scan over every commit of every ref):
 - private paths: nothing tracked under data/, runs/ or .cache/, no tracked .env file;
@@ -11,13 +12,15 @@ Rules (load_rules + scan; publish_check.py runs the same scan over every commit 
   data/: the derived case files, data/forbidden.txt): the domains of every record's key field (url, website, ...; host
   and registrable domain; URL hosts of case files), the product and vendor names of the labelled CSV (whole word,
   case-insensitive, at least MIN_NAME characters; the vendor also without its legal suffix) and its row text (any
-  RUN-word run of a cell that only one row has) are forbidden in every tracked file, path and commit message (row
-  text outside ZONE only: there it would mean labels in code, prompts or fixtures; in ZONE, agent-written traces of
-  blind products, a match can only be a coincidence);
+  RUN-word run of a cell that only one row has) are forbidden in every tracked file, path and commit message;
 - blind products (data/ files whose name says blind: data/blind.csv with id,url,product,vendor): their domains are
   allowed only in ZONE (stackgini-verdicts.csv and traces/ at the repo root) and forbidden everywhere else. A labelled
   domain that is also a blind one (equal, or a subdomain either way) is allowed in ZONE too, with the names of its
   labelled row, and so is a labelled name that occurs in a blind file (the same vendor);
+- labelled sources: inside ZONE (file content, not paths) the other labelled domains and names are reported as kind
+  "labelled-source" (a blind trace citing a labelled-set site, or naming a labelled vendor) with path:line: FAIL by
+  default, INFO under the switch above. Labelled row text stays FAIL in ZONE too; outside ZONE nothing changes.
+  tools/redact_labelled.py withholds those URLs and names in the working tree before the commit;
 - secrets: TOKENS shapes anywhere;
 - attribution: ATTRIB phrases in commit and tag messages and in files (this guard's own files are exempt: they hold
   the patterns).
@@ -52,8 +55,11 @@ TOKENS = re.compile(r"(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{20,}|tvly-[A-Za-z0-9
                     r"|-----BEGIN [A-Z0-9 ]+-----")
 PRIVATE = ("data/", "runs/", ".cache/")
 ZERO = "0" * 40
-KINDS = ("private path", "labelled domain", "labelled name", "labelled text", "blind domain", "token", "attribution")
+SOURCE = "labelled-source"  # a labelled domain or name inside ZONE
+KINDS = ("private path", "labelled domain", "labelled name", "labelled text", SOURCE, "blind domain", "token",
+         "attribution")
 BLIND_KIND = "blind domain"  # outside ZONE
+ALLOW_ENV = "PREPUSH_ALLOW_LABELLED_SOURCES"
 
 
 def git(*args, inp=None, ok=(0,)):
@@ -114,30 +120,44 @@ def related(a, b):
 class Matcher:
     """Finds forbidden domains (dot-aligned tokens), names (whole-word n-grams) and labelled text runs in a text."""
 
-    def __init__(self, domains, names, runs):
+    def __init__(self, domains, names, runs, name_kind="labelled name"):
         self.domains, self.names, self.runs = dict(domains), set(names), dict(runs)
+        self.name_kind = name_kind
         self.lens = sorted({len(n.split()) for n in self.names})
 
-    def find(self, text):
-        low, hits = str(text).casefold(), set()
-        if self.domains:
-            for tok in DOMTOK.findall(low):
-                labels = tok.split(".")
-                for i in range(len(labels) - 1):
-                    for j in range(i + 2, min(len(labels), i + MAX_LABELS) + 1):
-                        d = ".".join(labels[i:j])
-                        if d in self.domains:
-                            hits.add((self.domains[d], d))
-        if self.names or self.runs:
-            ws = WORD.findall(low)
-            for n in self.lens:
-                hits.update(("labelled name", g) for g in grams(ws, n) if g in self.names)
-            rows = {}
-            for g in grams(ws, RUN) if self.runs else ():
-                if g in self.runs:
-                    rows.setdefault(self.runs[g], g)  # one hit per labelled row
-            hits.update(("labelled text", g) for g in rows.values())
+    def domain_hits(self, low):
+        """[(kind, domain, offset)] in a casefolded text."""
+        hits = []
+        for m in DOMTOK.finditer(low):
+            labels, off = m.group(0).split("."), m.start()
+            starts = [off]
+            for lab in labels[:-1]:
+                starts.append(starts[-1] + len(lab) + 1)
+            for i in range(len(labels) - 1):
+                for j in range(i + 2, min(len(labels), i + MAX_LABELS) + 1):
+                    d = ".".join(labels[i:j])
+                    if d in self.domains:
+                        hits.append((self.domains[d], d, starts[i]))
         return hits
+
+    def locate(self, text):
+        """[(kind, term, offset)]: every domain and name occurrence; row text once per labelled row."""
+        low = str(text).casefold()  # casefold keeps every newline, so offsets give the right line
+        hits = self.domain_hits(low) if self.domains else []
+        if self.names or self.runs:
+            ms = list(WORD.finditer(low))
+            ws = [m.group(0) for m in ms]
+            for n in self.lens:
+                hits += [(self.name_kind, g, ms[i].start()) for i, g in enumerate(grams(ws, n)) if g in self.names]
+            rows = {}
+            for i, g in enumerate(grams(ws, RUN) if self.runs else ()):
+                if g in self.runs:
+                    rows.setdefault(self.runs[g], (g, ms[i].start()))  # one hit per labelled row
+            hits += [("labelled text", g, o) for g, o in rows.values()]
+        return hits
+
+    def find(self, text):
+        return {(k, t) for k, t, _ in self.locate(text)}
 
 
 class Rules:
@@ -148,7 +168,8 @@ class Rules:
         self.n_labelled, self.n_blind, self.n_names, self.n_runs = len(labelled), len(blind), len(names), len(runs)
         lab = {d: "labelled domain" for d in labelled}
         self.out = Matcher({**lab, **{d: BLIND_KIND for d in blind}}, names, runs)
-        self.zone = Matcher({d: k for d, k in lab.items() if d not in related_doms}, set(names) - set(zone_names), {})
+        self.zone = Matcher({d: SOURCE for d in lab if d not in related_doms}, set(names) - set(zone_names), runs,
+                            name_kind=SOURCE)
         self.n_domains = len(self.out.domains)
         self._paths = {}
 
@@ -317,19 +338,24 @@ def message(obj):
 
 
 def check_text(text, matcher, attribution=True):
-    hits = set(matcher.find(text))
+    """-> sorted [(kind, term, line)], one per term and line."""
+    low = str(text).casefold()
+    hits = {(k, t, low.count("\n", 0, o) + 1) for k, t, o in matcher.locate(text)}  # offsets into the casefold
+    raw = []
     for m in TOKENS.finditer(text):
         t = m.group(0)
         body = t.split("-", 1)[-1] if not t.startswith("-----") else "x1"
         if any(c.isdigit() for c in body) and any(c.isalpha() for c in body):
-            hits.add(("token", t))
+            raw.append(("token", t, m.start()))
     if attribution:
-        hits.update(("attribution", m.group(0).lower()) for m in ATTRIB.finditer(text))
-    return sorted(hits)
+        raw += [("attribution", m.group(0).lower(), m.start()) for m in ATTRIB.finditer(text)]
+    hits |= {(k, t, text.count("\n", 0, o) + 1) for k, t, o in raw}
+    return sorted(hits, key=lambda h: (h[2], h[0], h[1]))
 
 
 def scan(commits, rules, tags=()):
-    """-> (findings [(commit, where, kind, term)], stats). Each path once, each (blob, path class) once."""
+    """-> (findings [(commit, where, line, kind, term)], stats); line 0 for a path. Each path once, each (blob, path
+    class) once."""
     findings, seen_path, blobs = [], set(), {}
     commits = list(commits)
     objs = objects(commits + [sha for _, sha in tags])
@@ -338,8 +364,8 @@ def scan(commits, rules, tags=()):
             if path not in seen_path:
                 seen_path.add(path)
                 if private(path):
-                    findings.append((c, path, "private path", path))
-                findings += [(c, path, k + " in path", t) for k, t in rules.matcher(in_zone(path)).find(path)]
+                    findings.append((c, path, 0, "private path", path))
+                findings += [(c, path, 0, k + " in path", t) for k, t in sorted(rules.matcher(in_zone(path)).find(path))]
             blobs.setdefault((sha, in_zone(path), path in ATTRIB_EXEMPT), (c, path))
     data = objects([k[0] for k in blobs])
     for (sha, zone, exempt), (c, path) in blobs.items():
@@ -347,18 +373,28 @@ def scan(commits, rules, tags=()):
         if b is None or len(b) > MAX_BLOB:
             continue
         text = b.decode("utf-8", "replace")
-        findings += [(c, path, k, t) for k, t in check_text(text, rules.matcher(zone), attribution=not exempt)]
+        findings += [(c, path, n, k, t) for k, t, n in check_text(text, rules.matcher(zone), attribution=not exempt)]
     for c in commits:
-        findings += [(c, "(message)", k, t) for k, t in check_text(message(objs.get(c, b"")), rules.out)]
+        findings += [(c, "(message)", n, k, t) for k, t, n in check_text(message(objs.get(c, b"")), rules.out)]
     for name, sha in tags:
-        findings += [(sha, f"(tag {name})", k, t) for k, t in check_text(message(objs.get(sha, b"")), rules.out)]
+        findings += [(sha, f"(tag {name})", n, k, t) for k, t, n in check_text(message(objs.get(sha, b"")), rules.out)]
     return findings, {"commits": len(commits), "blobs": len(blobs), "paths": len(seen_path), "tags": len(tags)}
 
 
+def split(findings, allow_sources):
+    """-> (fails, infos): with allow_sources, labelled-source hits in ZONE content are INFO, everything else FAIL."""
+    info = [f for f in findings if allow_sources and f[3] == SOURCE]
+    return [f for f in findings if not (allow_sources and f[3] == SOURCE)], info
+
+
+def allow_sources(argv):
+    return "--allow-labelled-sources" in argv or os.environ.get(ALLOW_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
 def fmt(f, rules):
-    c, where, kind, term = f
+    c, where, line, kind, term = f
     term = rules.safe(term) if kind == "private path" else mask(term)
-    return f"{c[:8]}:{rules.safe(where)}:{term} ({kind})"
+    return f"{c[:8]}:{rules.safe(where)}:{f'{line}:' if line else ''}{term} ({kind})"
 
 
 def rev_list(*args):
@@ -388,17 +424,24 @@ def main(argv):
     if not rules.rows:
         print(f"prepush: warning: no labelled rows at {rules.labels_path}: name and text checks skipped", file=sys.stderr)
     commits = list(dict.fromkeys(c for _, cs in jobs for c in cs))
-    findings, st = scan(commits, rules)
+    found, st = scan(commits, rules)
+    findings, infos = split(found, allow_sources(argv))
     label = ",".join(r[:8] for r, _ in jobs) or "nothing"
     print(f"prepush: {label} ({st['commits']} commits, {rules.n_names} names, {rules.n_blind} blind domains) "
-          f"checked against {rules.n_domains} event domains: {len(findings)} findings", file=sys.stderr)
+          f"checked against {rules.n_domains} event domains: {len(findings)} findings"
+          + (f", {len(infos)} {SOURCE} allowed ({ALLOW_ENV})" if infos else ""), file=sys.stderr)
     for f in findings[:100]:
         print(f"prepush: FAIL {fmt(f, rules)}", file=sys.stderr)
     if len(findings) > 100:
         print(f"prepush: ... and {len(findings) - 100} more", file=sys.stderr)
+    for f in infos[:50]:
+        print(f"prepush: INFO {fmt(f, rules)}, allowed", file=sys.stderr)
     if findings:
         print("prepush: push blocked. Remove the data or the line (git rm --cached / amend), then push again. A generic "
-              "word: tests/leak_allow.txt ('word # reason'); a public domain: tools/prepush_allow.txt.", file=sys.stderr)
+              "word: tests/leak_allow.txt ('word # reason'); a public domain: tools/prepush_allow.txt."
+              + (f" Labelled-set sources in the verdicts or traces: python3 tools/redact_labelled.py, then amend, or "
+                 f"{ALLOW_ENV}=1 if that policy is decided." if any(f[3] == SOURCE for f in findings) else ""),
+              file=sys.stderr)
     return 1 if findings else 0
 
 

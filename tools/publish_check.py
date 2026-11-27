@@ -6,13 +6,19 @@
   python3 tools/publish_check.py --flip   git fetch origin (so every branch on GitHub is in --all), the same check,
                                           and only on PASS: gh repo edit REPO --visibility public, then prints
                                           gh repo view REPO --json visibility. Never flips on FAIL.
+  --allow-labelled-sources                (with or without --flip) labelled domains and names inside
+                                          stackgini-verdicts.csv and traces/ (kind "labelled-source") pass, listed as
+                                          INFO; labelled row text and everything outside those two places stay FAIL.
 
-Rules: tools/prepush.py (labelled domains, names and row text everywhere; blind-product domains outside
-stackgini-verdicts.csv and traces/; private paths; token shapes; attribution phrases in messages and files). Each blob
-is checked once per path class. Output: one PASS or FAIL line per rule, then one FAIL line per finding as
-commit:path:term (kind) with the middle of the term masked, then RESULT. Exit 1 on any FAIL. Fails closed: no
-labelled rows under data/ is a FAIL, since there would be nothing to check against.
+Rules: tools/prepush.py (labelled domains, names and row text everywhere, in the two places as "labelled-source";
+blind-product domains outside stackgini-verdicts.csv and traces/; private paths; token shapes; attribution phrases in
+messages and files). Each blob is checked once per path class. Output: the mode, one PASS or FAIL line per rule, one
+FAIL line per finding as commit:path:line:term (kind) with the middle of the term masked, the INFO lines and masked
+term counts of allowed labelled sources, then RESULT. Exit 1 on any FAIL. Fails closed: no labelled rows under data/
+is a FAIL, since there would be nothing to check against. The switch is a flag only (no env), so a flip under it is
+always typed on purpose.
 """
+import collections
 import os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,35 +39,48 @@ def tags():
     return [(p[2], p[1]) for p in (l.split(" ", 2) for l in out.splitlines()) if len(p) == 3 and p[0] == "tag"]
 
 
-def check(root):
+def check(root, allow_sources=False):
     rules = pp.load_rules(root)
     blind = sum(f.startswith("blind ") for f in rules.files)
     print(f"publish_check: rules: {rules.rows} labelled rows ({rules.labels_path}), {rules.n_labelled} labelled "
           f"domains, {rules.n_names} names, {rules.n_runs} text runs; {rules.n_blind} blind domains from {blind} files")
+    print("publish_check: mode: " + ("labelled sources allowed in stackgini-verdicts.csv and traces/ (INFO)"
+                                     if allow_sources else "strict (labelled sources FAIL)"))
     commits = pp.rev_list("--all")
-    findings, st = pp.scan(commits, rules, tags())
+    found, st = pp.scan(commits, rules, tags())
+    findings, infos = pp.split(found, allow_sources)
     print(f"publish_check: scanned {st['commits']} commits, {st['blobs']} blobs, {st['paths']} paths, "
           f"{st['tags']} tag messages")
     fails = 0
     if not rules.rows:
         print(f"FAIL setup: no labelled rows at {rules.labels_path} (nothing to check against)")
         fails += 1
-    by = {k: [f for f in findings if f[2].removesuffix(" in path") == k] for k in pp.KINDS}
+    base = lambda f: f[3].removesuffix(" in path")
+    by = {k: [f for f in findings if base(f) == k] for k in pp.KINDS}
     for kind, fs in by.items():
-        print(f"{'FAIL' if fs else 'PASS'} {kind}: {len(fs)} findings")
+        n_info = sum(base(f) == kind for f in infos)
+        print(f"{'FAIL' if fs else 'PASS'} {kind}: {len(fs)} findings" + (f", {n_info} allowed (INFO)" if n_info else ""))
     shown = [f for k in pp.KINDS for f in by[k]]
     for f in shown[:SHOW]:
         print(f"FAIL {pp.fmt(f, rules)}")
     if len(shown) > SHOW:
         print(f"FAIL ... and {len(shown) - SHOW} more")
+    for f in infos[:SHOW]:
+        print(f"INFO {pp.fmt(f, rules)}, allowed")
+    src = [f for f in found if f[3] == pp.SOURCE]
+    if src:
+        terms = collections.Counter(pp.mask(f[4]) for f in src)
+        files = len({f[1] for f in src})
+        print(f"{'INFO' if allow_sources else 'FAIL'} {pp.SOURCE} terms in {files} files: "
+              + ", ".join(f"{t} x{n}" for t, n in terms.most_common()))
     fails += len(findings)
     print(f"RESULT {'FAIL' if fails else 'PASS'}: {len(findings)} findings in {sum(1 for v in by.values() if v)} "
-          f"of {len(pp.KINDS)} rules")
+          f"of {len(pp.KINDS)} rules" + (f"; {len(infos)} {pp.SOURCE} allowed" if infos else ""))
     return fails == 0
 
 
 def main(argv):
-    flip = "--flip" in argv
+    flip, allow = "--flip" in argv, "--allow-labelled-sources" in argv
     repo = argv[argv.index("--repo") + 1] if "--repo" in argv else REPO
     root = pp.git("rev-parse", "--show-toplevel").decode().strip()
     os.chdir(root)
@@ -70,7 +89,7 @@ def main(argv):
         if rc:
             print(f"FAIL fetch: git fetch origin: {out[-300:]}\nnot flipped")
             return 1
-    if not check(root):
+    if not check(root, allow):
         if flip:
             print(f"not flipped: {repo} stays private")
         return 1
