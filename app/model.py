@@ -30,7 +30,9 @@ _sem = None
 _sem_lock = threading.Lock()
 _rr = itertools.count()
 _log_lock = threading.Lock()
-LIMIT_RE = re.compile(r"usage limit|rate limit|rate_limit|429|overloaded|529|too many requests", re.I)
+LIMIT_RE = re.compile(r"usage limit|rate limit|rate_limit|429|overloaded|529|too many requests|quota", re.I)
+QUOTA_RE = re.compile(r"quota exceeded|hit your [\w -]{0,20}limit", re.I)   # an account out for hours, not seconds
+RESET_RE = re.compile(r"resets (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)")
 
 
 class ModelError(RuntimeError):
@@ -68,9 +70,34 @@ def model_id():
     return "fake" if mode() == "fake" else f"{_model()}:{_thinking()} (research {_thinking('intake')})"
 
 
+def _down_dir():
+    return os.environ.get("MODEL_DOWN_DIR", os.path.join(tempfile.gettempdir(), "vendor-receipts-accounts-down"))
+
+
+def _mark_down(account, msg):
+    """An account that reported its quota exhausted is skipped by every process until its reset time."""
+    m = RESET_RE.search(msg)
+    until = time.mktime(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")) - time.timezone if m else time.time() + 3600
+    try:
+        os.makedirs(_down_dir(), exist_ok=True)
+        with open(os.path.join(_down_dir(), account), "w") as f:
+            f.write(str(until))
+    except OSError:
+        pass
+
+
+def _is_down(account):
+    try:
+        with open(os.path.join(_down_dir(), account)) as f:
+            return float(f.read().strip() or 0) > time.time()
+    except (OSError, ValueError):
+        return False
+
+
 def _accounts():
     acc = [a.strip() for a in os.environ.get("MODEL_ACCOUNTS", "default,acct3").split(",") if a.strip()]
-    return [a for a in acc if a != "acct2"] or ["default"]
+    acc = [a for a in acc if a != "acct2"] or ["default"]
+    return [a for a in acc if not _is_down(a)] or acc
 
 
 def _semaphore():
@@ -122,6 +149,20 @@ def _check_stop(what):
     if left is not None and left <= 5:
         raise HardStop(f"{what}: hard stop (wall cap) reached")
     return left
+
+
+_or_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _semaphore_ctx(left):
+    sem = _semaphore()
+    if not sem.acquire(timeout=left if left is not None else None):
+        raise HardStop("hard stop while waiting for a model slot")
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 @contextlib.contextmanager
@@ -199,10 +240,40 @@ def _text(system, user, purpose):
         errors.append(f"{acc} rc={rc} {msg}")
         if rc == -9:
             break  # a timeout is not an account problem: a second try would only double the wait
+        if QUOTA_RE.search(msg):
+            _mark_down(acc, msg)
         if LIMIT_RE.search(msg):
             _log("runs/alerts.log", f"{time.strftime('%Y-%m-%dT%H:%M:%S')} model {purpose} account {acc} limit: {msg[:200]}")
             print(f"model: {acc} limit, trying the next account", file=sys.stderr)
+    if all(LIMIT_RE.search(e) for e in errors) and os.environ.get("LLM_OR_KEY"):
+        return _openrouter(system, user, purpose, errors)
     raise ModelError(f"{purpose}: pi failed: " + " | ".join(errors))
+
+
+def _openrouter(system, user, purpose, errors):
+    """Last resort when the subscription accounts are out: the same model (Opus 5.5) and effort through OpenRouter.
+    Env LLM_OR_KEY (kc item openrouter-api-key), LLM_OR_MODEL (anthropic/claude-opus-5.5). Logged like a pi call."""
+    import llm
+    left = _check_stop(purpose)
+    effort = _thinking(purpose)
+    eps = [("or", "https://openrouter.ai/api/v1", os.environ.get("LLM_OR_MODEL", "anthropic/claude-opus-5.5"),
+            os.environ["LLM_OR_KEY"])]
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    t0 = time.time()
+    env = {"LLM_OR_EXTRA": json.dumps({"reasoning": {"effort": effort}, "usage": {"include": True}}),
+           "LLM_TIMEOUT": str(min(900, left) if left else 900), "LLM_DEADLINE": str(min(1200, left) if left else 1200)}
+    with _or_lock:
+        old = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+    try:
+        with _semaphore_ctx(left), _global_slot():
+            r = llm._call(msgs, 0, 32000, False, eps)
+    except llm.LLMError as e:
+        raise ModelError(f"{purpose}: pi failed: " + " | ".join(errors) + f" | openrouter: {e}") from e
+    _log("runs/model_calls.jsonl", {"at": time.strftime("%H:%M:%S"), "purpose": purpose, "account": "openrouter",
+                                    "thinking": effort, "seconds": round(time.time() - t0, 1),
+                                    "in_chars": len(system) + len(user), "out_chars": len(r["text"]), "rc": 0, "err": ""})
+    return {"text": r["text"], "account": "openrouter"}
 
 
 def _parse(text):

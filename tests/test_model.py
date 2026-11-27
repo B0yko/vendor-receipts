@@ -22,7 +22,7 @@ class ModelTest(unittest.TestCase):
         with open(b, "w") as f:
             f.write(FAKE)
         os.chmod(b, os.stat(b).st_mode | stat.S_IEXEC)
-        self.env = mock.patch.dict(os.environ, {"PI_BIN": b, "MODEL_ACCOUNTS": "default,acct3", "RECEIPTS_FAKE": "", "MODEL_THINKING": "xhigh", "MODEL_THINKING_RESEARCH": "high", "MODEL_SLOTS_DIR": os.path.join(self.d, "slots0"),
+        self.env = mock.patch.dict(os.environ, {"PI_BIN": b, "MODEL_ACCOUNTS": "default,acct3", "RECEIPTS_FAKE": "", "MODEL_DOWN_DIR": os.path.join(self.d, "down0"), "MODEL_THINKING": "xhigh", "MODEL_THINKING_RESEARCH": "high", "MODEL_SLOTS_DIR": os.path.join(self.d, "slots0"),
                                                 "REPLAY": ""})
         self.env.start()
         self.cd = mock.patch.object(cache, "CACHE_DIR", os.path.join(self.d, "c"))
@@ -61,6 +61,13 @@ class ModelTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MODEL_HARD_STOP": str(_t.time() + 2)}):
             with self.assertRaises(model.ModelError):
                 model.ask_json("sys", "late call", "t")
+
+    def test_quota_marks_account_down_for_every_later_call(self):
+        with mock.patch.dict(os.environ, {"MODEL_DOWN_DIR": os.path.join(self.d, "down")}):
+            model._mark_down("acct3", "quota exceeded (five_hour; account acct3; resets 2099-01-01T00:00:00.000Z)")
+            self.assertEqual(model._accounts(), ["default"])
+            model._mark_down("default", "quota exceeded resets 2000-01-01T00:00:00")
+            self.assertEqual(model._accounts(), ["default"])  # an expired mark is ignored
 
     def test_never_acct2(self):
         with mock.patch.dict(os.environ, {"MODEL_ACCOUNTS": "acct2"}):
