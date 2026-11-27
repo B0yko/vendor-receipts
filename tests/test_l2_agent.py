@@ -77,10 +77,10 @@ def intake_answer(n_per_cat=2):
             continue
         actions += [{"tool": "search", "args": {"query": f"Acme Cloud topic {k} q{j}"}, "category": k,
                      "hypothesis": f"h{k}"} for j in range(n_per_cat)]
-    actions += [{"tool": "dns", "args": {"host": "app.acme.example.com"}, "category": 17, "hypothesis": "EU hosting"},
-                {"tool": "wayback", "args": {"url": HOME + "terms"}, "category": 16, "hypothesis": "terms changed"},
-                {"tool": "fail", "args": {"x": 1}, "category": 9, "hypothesis": "a failing tool"},
-                {"tool": "nope", "args": {}, "category": 9, "hypothesis": "unknown tool"}]
+    actions = [{"tool": "dns", "args": {"host": "app.acme.example.com"}, "category": 17, "hypothesis": "EU hosting"},
+               {"tool": "wayback", "args": {"url": HOME + "terms"}, "category": 16, "hypothesis": "terms changed"},
+               {"tool": "fail", "args": {"x": 1}, "category": 9, "hypothesis": "a failing tool"},
+               {"tool": "nope", "args": {}, "category": 9, "hypothesis": "unknown tool"}] + actions
     plan = {str(k): {"hypotheses": [f"hypothesis for {k}"], "not_applicable": ""} for k in ledger.CATEGORIES}
     plan["20"] = {"hypotheses": [], "not_applicable": "closed source, no public code"}
     return {"identity": {"product": "Acme Cloud", "vendor": "Acme", "legal_entity": "Acme GmbH", "parent": "",
@@ -250,10 +250,20 @@ class TestLoop(Base):
         self.assertEqual(seen1, seen2)
 
     def test_tool_call_cap(self):
-        r, seen, _ = self.run_agent(intake=intake_answer(n_per_cat=8))
+        n = iter(range(10_000))
+
+        def endless(system, user):                        # 30 fresh actions every round, never done
+            return {"next_actions": [{"tool": "search", "args": {"query": f"Acme more {next(n)}"}, "category": 5}
+                                     for _ in range(30)], "done": False}
+        model.set_fake("intake", lambda s, u: intake_answer(n_per_cat=8))
+        model.set_fake("round", endless)
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME)
         self.assertTrue(r["stats"]["capped"])
         self.assertEqual(r["stats"]["tool_calls"], agent.MAX_TOOL_CALLS)
-        self.assertEqual(len(r["rounds"]), 1)
+        site = 1 + agent.MAX_SITE_PAGES + 1 + 1                  # home, 14 pages, security.txt, one extract
+        self.assertEqual([len(x["actions"]) for x in r["rounds"]],
+                         [40, 24, 24, agent.MAX_TOOL_CALLS - site - 88])
         self.assertEqual(ledger.validate_research(r), [])
 
     def test_model_failure_is_partial(self):
@@ -311,10 +321,113 @@ class TestHints(Base):
 
     def test_news_tool_is_a_search(self):
         ans = intake_answer()
-        ans["actions"].append({"tool": "news", "args": {"query": "Acme layoffs"}, "category": 21, "hypothesis": "x"})
+        ans["actions"].insert(0, {"tool": "news", "args": {"query": "Acme layoffs"}, "category": 21, "hypothesis": "x"})
         r, _, _ = self.run_agent(intake=ans)
         self.assertIn("news: Acme layoffs", r["matrix"]["21"]["queries"])
         self.assertEqual(r["sources"]["https://news.example.org/acme-layoffs"]["kind"], "search")
+
+
+def words(s):
+    return len(s.split())
+
+
+class TestCaps(Base):
+    LONG = " ".join(f"w{i}" for i in range(80))
+
+    def oversized_intake(self):
+        a = intake_answer(n_per_cat=8)
+        q = "We are SOC 2 Type II certified since 2015."
+        a["identity"].update(notes=self.LONG, same_name_risks=[f"Acme {i}" for i in range(6)],
+                             key_people=[{"name": f"P{i}", "role": "x"} for i in range(9)])
+        a["site"]["claims"] = [{"text": f"claim {i} " + self.LONG, "kind": "other", "quote": q, "url": HOME}
+                               for i in range(30)]
+        a["site"]["claims"][0]["quote"] = "x" * 201
+        a["site"]["inconsistencies"] = [{"text": self.LONG, "quote": q, "url": HOME} for _ in range(9)]
+        a["site"]["signals"] = {"notes": self.LONG}
+        ev = {"category": 13, "url": HOME, "date": "2015", "author_type": "vendor_self", "severity": "minor",
+              "polarity": "neutral", "hypothesis": self.LONG, "text": self.LONG}
+        a["evidence"] = [{**ev, "quote": "y" * 251}] + [{**ev, "quote": f"Acme quote {i}"} for i in range(20)]
+        a["plan"] = {str(k): {"hypotheses": [self.LONG] * 5} for k in ledger.CATEGORIES}
+        for x in a["actions"]:
+            x["hypothesis"] = self.LONG
+        return a
+
+    def oversized_round(self, prompts_seen):
+        def fn(system, user):
+            prompts_seen.append(user)
+            m = re.search(r"url: (https://news\.example\.org/[a-z0-9-]+)", user)
+            ev = {"category": 2, "url": m.group(1), "author_type": "trade_press", "severity": "moderate",
+                  "polarity": "negative", "text": self.LONG}
+            return {"evidence": [{**ev, "quote": f"Report {i}"} for i in range(20)],
+                    "matrix_updates": {str(k): {"status": "searched_not_found", "note": self.LONG}
+                                       for k in ledger.CATEGORIES if k != 20},
+                    "claim_checks": [{"claim_id": "c1", "status": "not_found", "note": self.LONG}],
+                    "next_actions": [{"tool": "search", "args": {"query": f"Acme next {len(prompts_seen)} {i}"},
+                                      "category": 7, "hypothesis": self.LONG} for i in range(40)],
+                    "identity_updates": {"same_name_risks": [f"Other {i}" for i in range(6)]}, "done": False}
+        return fn
+
+    def test_caps_enforced_on_oversized_answers(self):
+        c, seen = prompts.CAPS, []
+        model.set_fake("intake", lambda s, u: self.oversized_intake())
+        model.set_fake("round", self.oversized_round(seen))
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME)
+        self.assertEqual(ledger.validate_research(r), [])
+        ident, site = r["identity"], r["site"]
+        self.assertLessEqual(words(ident["notes"]), c["identity_notes_words"] + 1)
+        self.assertEqual(len(ident["same_name_risks"]), 2 * c["same_name_risks"])   # 3 per answer: intake + round 1
+        self.assertEqual(len(ident["key_people"]), c["key_people"])
+        self.assertEqual(len(site["claims"]), c["claims"])
+        self.assertEqual(site["claims"][0]["quote"], "")                            # over-long: dropped, never cut
+        self.assertTrue(all(words(x["text"]) <= c["claim_text_words"] + 1 for x in site["claims"]))
+        self.assertEqual(len(site["inconsistencies"]), c["inconsistencies"])
+        self.assertLessEqual(words(site["signals"]["notes"]), c["note_words"] + 1)
+        by_round = {}
+        for e in r["evidence"]:
+            by_round[e["round"]] = by_round.get(e["round"], 0) + 1
+            self.assertLessEqual(len(e["quote"]), c["evidence_quote_chars"])
+            self.assertLessEqual(words(e["text"]), c["evidence_text_words"] + 1)
+            self.assertLessEqual(words(e["hypothesis"]), c["evidence_hypothesis_words"] + 1)
+        self.assertEqual(set(by_round.values()), {c["evidence"]})                  # 12 per answer, every answer
+        self.assertNotIn("y" * 251, [e["quote"] for e in r["evidence"]])
+        fails = [f["error"] for f in r["sources_failed"]]
+        self.assertTrue(any("quote over 250 chars" in f for f in fails))
+        self.assertTrue(any("over the cap of 12 evidence" in f for f in fails))
+        for k, h in agent._Run(HOME, None).hyp.items():
+            self.assertEqual(h, [])
+        self.assertEqual(len(r["rounds"][0]["actions"]), c["intake_actions"])
+        self.assertTrue(all(len(x["actions"]) <= c["round_actions"] for x in r["rounds"][1:]))
+        self.assertEqual(len(r["rounds"][1]["actions"]), c["round_actions"])
+        for x in r["rounds"]:
+            for a in x["actions"]:
+                self.assertLessEqual(words(a["hypothesis"]), c["action_hypothesis_words"] + 1)
+        for k, row in r["matrix"].items():                                      # model notes (20 keeps the code's
+            if k != "20":                                                       # "hypotheses: ..." note)
+                self.assertLessEqual(words(row["note"]), c["note_words"] + 1, k)
+        self.assertLessEqual(words(r["claim_checks"][0]["note"]), c["note_words"] + 1)
+        # plan: 2 hypotheses of <= 15 words per category, shown in the round prompt
+        line = next(x for x in seen[0].splitlines() if x.startswith("5. "))
+        hyp = line.split("| hypotheses: ")[1].split(" | note:")[0].split("; ")
+        self.assertEqual(len(hyp), c["hypotheses"])
+        self.assertTrue(all(words(h) <= c["hypothesis_words"] + 1 for h in hyp))
+
+    def test_prompts_state_targets_and_caps(self):
+        table = {"search": {"doc": "web search", "args": ["query"]}}
+        i, r = prompts.intake_system(table), prompts.round_system(table)
+        self.assertIn("under 20,000 characters", i)
+        self.assertIn("under 15,000 characters", r)
+        for p in (i, r):
+            self.assertIn("compact JSON", p)
+            self.assertIn("Never restate the input", p)
+            self.assertIn("evidence <= 12 per answer", p)
+            self.assertIn("quote <= 250 chars", p)
+        for cap in ("identity notes <= 40 words", "same_name_risks <= 3", "claims <= 15", "quote <= 200 chars",
+                    "inconsistencies <= 5", "at most 2 hypotheses of <= 15 words", "actions <= 40",
+                    "hypothesis <= 12 words"):
+            self.assertIn(cap, i)
+        self.assertIn("next_actions <= 24", r)
+        self.assertIn("notes <= 20 words", r)
 
 
 class TestPieces(unittest.TestCase):

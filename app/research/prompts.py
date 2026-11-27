@@ -6,6 +6,8 @@ tool docs, with no clocks and a fixed order, so the same inputs give the same pr
 
     system = intake_system(table); user = intake_user(url, pages)
     system = round_system(table);  user = round_user(view)
+Answer size is the time cost: CAPS holds the targets (intake <= 20k chars, round <= 15k) and the per-field caps that
+size_block() states and app/research/agent.py enforces.
 `table` is {tool name: {"doc", "args"}} (app.research.tools.TOOLS without the functions).
 """
 import json
@@ -16,6 +18,15 @@ QUESTION = "What will a buyer not see on this website?"
 SOURCE_CHARS = 4000      # text shown per source in a round
 PAGE_CHARS = 6000        # text shown per vendor page at intake (the page at the URL gets twice that)
 PROMPT_CHARS = 300_000   # whole user prompt, about
+
+# Answer size is the time cost (~110 output chars/s at xhigh): targets and hard caps, said in the prompts and enforced
+# by app/research/agent.py after parsing (lists cut, words cut; an over-long quote drops its evidence, never cut).
+CAPS = {"intake_chars": 20_000, "round_chars": 15_000,
+        "identity_notes_words": 40, "same_name_risks": 3, "key_people": 5,
+        "claims": 15, "claim_text_words": 20, "claim_quote_chars": 200, "inconsistencies": 5,
+        "evidence": 12, "evidence_text_words": 25, "evidence_quote_chars": 250, "evidence_hypothesis_words": 12,
+        "hypotheses": 2, "hypothesis_words": 15, "intake_actions": 40, "round_actions": 24,
+        "action_hypothesis_words": 12, "note_words": 20}
 
 ROLE = f"""You are the research brain of a buyer's due-diligence agent. A procurement lead is about to decide whether
 to shortlist a software product and gives its URL. The question behind every step: "{QUESTION}"
@@ -93,9 +104,41 @@ EVIDENCE_SHAPE = ('{"category": 1-24, "text": "the finding in one plain sentence
                   '"quote": "verbatim passage", "date": "YYYY-MM-DD | YYYY-MM | YYYY | \'\'", '
                   f'"author_type": "{"|".join(ledger.AUTHOR_TYPES)}", "severity": "{"|".join(ledger.SEVERITIES)}", '
                   f'"polarity": "{"|".join(ledger.POLARITIES)}", "promise_link": "{"|".join(ledger.PROMISE_LINKS)}", '
-                  '"hypothesis": "what was being tested", "source_title": "title of the source"}')
+                  '"hypothesis": "what was being tested"}')
 ACTION_SHAPE = '{"tool": "search", "args": {"query": "..."}, "category": 1-24, "hypothesis": "what this tests"}'
-JSON_ONLY = "Answer with one JSON object only: no prose, no code fence."
+JSON_ONLY = "Answer with one JSON object only, compact (no indentation, no line breaks): no prose, no code fence."
+
+
+def size_block(kind):
+    """The answer-size target and hard caps for the intake or the round call."""
+    c = CAPS
+    ev = (f"evidence <= {c['evidence']} per answer (the strongest first), text <= {c['evidence_text_words']} words, "
+          f"quote <= {c['evidence_quote_chars']} chars and still verbatim (pick a shorter passage; a longer quote "
+          f"drops the evidence), hypothesis <= {c['evidence_hypothesis_words']} words, no source_title (code fills "
+          f"it), date and promise_link omitted when unknown")
+    act = f"each {{tool, args, category, hypothesis <= {c['action_hypothesis_words']} words}}"
+    if kind == "intake":
+        caps = [f"identity notes <= {c['identity_notes_words']} words; same_name_risks <= {c['same_name_risks']}; "
+                f"key_people <= {c['key_people']}",
+                f"claims <= {c['claims']} (the ones a buyer relies on most), text <= {c['claim_text_words']} words, "
+                f"quote <= {c['claim_quote_chars']} chars; inconsistencies <= {c['inconsistencies']}; signals notes "
+                f"<= {c['note_words']} words",
+                ev,
+                f"plan: per category at most {c['hypotheses']} hypotheses of <= {c['hypothesis_words']} words, or "
+                f"not_applicable with a reason of <= {c['note_words']} words",
+                f"actions <= {c['intake_actions']}, {act}"]
+        target = c["intake_chars"]
+    else:
+        caps = [ev, f"matrix_updates notes and claim_checks notes <= {c['note_words']} words",
+                f"next_actions <= {c['round_actions']}, {act}",
+                f"identity_updates: only new facts; notes <= {c['identity_notes_words']} words"]
+        target = c["round_chars"]
+    return "\n".join([f"Answer size (every output character costs time: the same substance in fewer characters):",
+                      f"- The whole answer stays under {target:,} characters of compact JSON (no pretty printing). "
+                      "Omit empty strings, empty lists and unknown optional fields.",
+                      "- Never restate the input: no copied page text beyond the verbatim quotes, no repeating of "
+                      "claims, identity, matrix state or earlier evidence.",
+                      "- Hard caps (code cuts anything above them):"] + [f"  - {x}" for x in caps])
 
 
 def _common(table):
@@ -118,10 +161,10 @@ Do five things:
    names); signals (copyright year, site generator, notes on design age, empty sections, template copy).
 3. evidence: findings from these pages only (author_type vendor_self, or vendor_against_interest when the vendor
    states something against its own interest, such as an end-of-life notice or a price rise).
-4. plan: for each of the 24 categories, the hypotheses for this product (what could be hidden there), or
+4. plan: for each of the 24 categories, at most 2 short hypotheses for this product (what could be hidden there), or
    not_applicable with the reason (for example category 20 for a closed-source product with no public code).
-5. actions: the first research round, at least 2 actions per category unless not applicable, ordered by what matters
-   most for this buyer. Most actions are searches; also use the technical tools where they test a claim (dns of the
+5. actions: the first research round, at most 40: one per applicable category first, a second for the categories
+   that matter most for this buyer (later rounds add the rest), ordered by what matters most. Most actions are searches; also use the technical tools where they test a claim (dns of the
    app domain, crtsh of the vendor domain, wayback of the terms and privacy pages, registry or github for SDKs).
 
 Answer shape:
@@ -133,7 +176,7 @@ Answer shape:
  "plan": {{"1": {{"hypotheses": ["..."], "not_applicable": ""}}, "...": {{}}, "24": {{"hypotheses": [], "not_applicable": "the reason"}}}},
  "actions": [{ACTION_SHAPE}]}}
 {JSON_ONLY}"""
-    return "\n\n".join([ROLE, task, _common(table)])
+    return "\n\n".join([ROLE, task, _common(table), size_block("intake")])
 
 
 def _cap(text, n):
@@ -181,7 +224,7 @@ their results (numbered sources with url, title, date and text). Do five things:
    do), and a short note of what was found.
 3. claim_checks: for the site's claims these results confirm or contradict: status confirmed, contradicted or
    not_found, evidence as the urls of the quotes (or the ids of earlier evidence), a note.
-4. next_actions: at most 30, the snowball from what you found first, then open categories and anchors not yet
+4. next_actions: at most 24, the snowball from what you found first, then open categories and anchors not yet
    searched. Never repeat a query or action already run. An empty list ends the research.
 5. done: true when every category has a final status or nothing worthwhile is left to search.
 Optional identity_updates (parent, legal_entity, former_names, key_people, same_name_risks, notes) when a source
@@ -195,7 +238,7 @@ Answer shape:
  "identity_updates": {{}},
  "done": false}}
 {JSON_ONLY}"""
-    return "\n\n".join([ROLE, task, _common(table)])
+    return "\n\n".join([ROLE, task, _common(table), size_block("round")])
 
 
 def _matrix_lines(matrix, hypotheses):

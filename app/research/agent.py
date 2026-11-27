@@ -7,6 +7,8 @@ identity -> site read -> plan over the 24 categories -> research loop -> claim c
 2. Intake (one model call, purpose "intake"; the buyer's product and vendor names from `hints` are anchors to
    verify, stored in identity.notes): identity, promise, claims, evidence from the vendor's own pages,
    hypotheses and round-1 actions for all 24 categories (ordered round-robin by category, so a cap trims depth first).
+   Answer size is the time cost: prompts.CAPS (intake <= 20k chars, round <= 15k, per-field caps) is said in the
+   prompts and enforced here: lists and summary texts are cut; an over-long quote drops its evidence, never cut.
 3. Rounds (<= 4): the actions run on 8 threads, results kept in action order; every retrieved text lands in sources,
    failures in sources_failed, queries in matrix[cat].queries. One model call (purpose "round") turns this round's
    results into evidence, matrix updates, claim checks and next actions. Code assigns ids e1.., keeps only evidence that
@@ -33,7 +35,8 @@ except ModuleNotFoundError as _e:  # lane L1 writes app/research/tools.py; until
 MAX_ROUNDS = 4
 MAX_TOOL_CALLS = 120
 MAX_SITE_PAGES = 14
-MAX_NEXT_ACTIONS = 30
+CAPS = prompts.CAPS          # answer-size caps, said in the prompts and enforced here after parsing
+MAX_NEXT_ACTIONS = CAPS["round_actions"]
 SHORT_PAGE = 400
 WORKERS = 8
 SITE_KEYWORDS = ("about", "company", "team", "imprint", "impressum", "legal", "customers", "case-stud", "pricing",
@@ -70,6 +73,12 @@ def _cat(v):
         return v
     s = _str(v)
     return int(s) if s.isdigit() else v
+
+
+def _words(v, n):
+    """At most n words of a summary text (never used on quotes: a quote is verbatim or dropped)."""
+    w = _str(v).split()
+    return " ".join(w) if len(w) <= n else " ".join(w[:n]) + " ..."
 
 
 def _wayback_date(ts):
@@ -285,27 +294,33 @@ class _Run:
         site = ans.get("site") if isinstance(ans.get("site"), dict) else {}
         self.r["site"]["core_promise"] = _str(site.get("core_promise"))
         self.r["site"]["segment"] = _str(site.get("segment"))
-        for c in site.get("claims") or []:
-            if isinstance(c, dict) and _str(c.get("text")):
-                u = _str(c.get("url"))
-                self.r["site"]["claims"].append({"id": f"c{len(self.r['site']['claims']) + 1}",
-                                                 "text": _str(c["text"]), "kind": _str(c.get("kind")) or "other",
-                                                 "quote": _str(c.get("quote")), "url": self.source_key(u) or u})
-        for c in site.get("inconsistencies") or []:
-            if isinstance(c, dict) and _str(c.get("text")):
-                self.r["site"]["inconsistencies"].append({k: _str(c.get(k)) for k in ("text", "quote", "url")})
+        claims = [c for c in site.get("claims") or [] if isinstance(c, dict) and _str(c.get("text"))]
+        for c in claims[:CAPS["claims"]]:
+            u, q = _str(c.get("url")), _str(c.get("quote"))
+            self.r["site"]["claims"].append({"id": f"c{len(self.r['site']['claims']) + 1}",
+                                             "text": _words(c["text"], CAPS["claim_text_words"]),
+                                             "kind": _str(c.get("kind")) or "other",
+                                             "quote": q if len(q) <= CAPS["claim_quote_chars"] else "",
+                                             "url": self.source_key(u) or u})
+        incs = [c for c in site.get("inconsistencies") or [] if isinstance(c, dict) and _str(c.get("text"))]
+        for c in incs[:CAPS["inconsistencies"]]:
+            q = _str(c.get("quote"))
+            self.r["site"]["inconsistencies"].append({"text": _words(c["text"], CAPS["evidence_text_words"]),
+                                                      "quote": q if len(q) <= CAPS["claim_quote_chars"] else "",
+                                                      "url": _str(c.get("url"))})
         sig = site.get("signals") if isinstance(site.get("signals"), dict) else {}
         for k in ("copyright_year", "generator", "notes"):
             if _str(sig.get(k)) and not self.r["site"]["signals"].get(k):
-                self.r["site"]["signals"][k] = _str(sig.get(k))
+                self.r["site"]["signals"][k] = _words(sig.get(k), CAPS["note_words"])
         self.take_evidence(ans.get("evidence"), 0)
         plan = ans.get("plan") if isinstance(ans.get("plan"), dict) else {}
         for k, p in plan.items():
             k = str(_cat(k))
             if k not in self.r["matrix"] or not isinstance(p, dict):
                 continue
-            self.hyp[k] = [_str(h) for h in p.get("hypotheses") or [] if _str(h)]
-            na = _str(p.get("not_applicable"))
+            self.hyp[k] = [_words(h, CAPS["hypothesis_words"]) for h in p.get("hypotheses") or []
+                           if _str(h)][:CAPS["hypotheses"]]
+            na = _words(p.get("not_applicable"), CAPS["note_words"])
             row = self.r["matrix"][k]
             if na:
                 row["status"], row["note"] = "not_applicable", na
@@ -316,12 +331,12 @@ class _Run:
         for a in acts:
             by.setdefault(a["category"], []).append(a)
         out, depth = [], 0
-        while len(out) < len(acts):          # round-robin by category: a cap trims depth, never whole categories
-            for c in sorted(by):
+        while len(out) < len(acts):          # round-robin by category (in the model's priority order): the cap
+            for c in by:                     # trims depth, never whole categories
                 if depth < len(by[c]):
                     out.append(by[c][depth])
             depth += 1
-        return out
+        return out[:CAPS["intake_actions"]]
 
     def hint_fallback(self):
         """Intake gave no identity: the buyer's names stand in (still marked unverified in identity.notes)."""
@@ -338,12 +353,14 @@ class _Run:
             if v and (overwrite or not ident[k] or k in ("parent", "legal_entity")):
                 ident[k] = v
         if _str(d.get("notes")):
-            ident["notes"] = (ident["notes"] + " " if ident["notes"] else "") + _str(d["notes"])
+            ident["notes"] = (ident["notes"] + " " if ident["notes"] else "") + _words(d["notes"],
+                                                                                    CAPS["identity_notes_words"])
         for k in ("former_names", "domains", "languages", "same_name_risks"):
-            for v in d.get(k) or []:
+            vals = d.get(k) if isinstance(d.get(k), list) else []
+            for v in vals[:CAPS["same_name_risks"]] if k == "same_name_risks" else vals:
                 self.add_unique(ident[k], _str(v))
         names = {p["name"] for p in ident["key_people"]}
-        for p in d.get("key_people") or []:
+        for p in (d.get("key_people") if isinstance(d.get("key_people"), list) else [])[:CAPS["key_people"]]:
             if isinstance(p, dict) and _str(p.get("name")) and _str(p["name"]) not in names:
                 names.add(_str(p["name"]))
                 ident["key_people"].append({"name": _str(p["name"]), "role": _str(p.get("role"))})
@@ -361,7 +378,8 @@ class _Run:
             if key in self.seen or key in keys:
                 continue
             keys.add(key)
-            out.append({"tool": tool, "args": args, "category": cat, "hypothesis": _str(a.get("hypothesis"))})
+            out.append({"tool": tool, "args": args, "category": cat,
+                        "hypothesis": _words(a.get("hypothesis"), CAPS["action_hypothesis_words"])})
             if limit and len(out) >= limit:
                 break
         return out
@@ -453,17 +471,23 @@ class _Run:
             if not isinstance(x, dict):
                 self.fail("evidence", "dropped: not an object")
                 continue
-            e = {"id": "", "category": _cat(x.get("category")), "text": _str(x.get("text")),
+            e = {"id": "", "category": _cat(x.get("category")),
+                 "text": _words(x.get("text"), CAPS["evidence_text_words"]),
                  "url": _str(x.get("url")), "quote": _str(x.get("quote")), "date": _str(x.get("date")),
                  "author_type": _str(x.get("author_type")), "severity": _str(x.get("severity")).lower(),
                  "polarity": _str(x.get("polarity")).lower(), "promise_link": _str(x.get("promise_link")).lower(),
-                 "hypothesis": _str(x.get("hypothesis")), "source_title": _str(x.get("source_title")), "round": rnd}
+                 "hypothesis": _words(x.get("hypothesis"), CAPS["evidence_hypothesis_words"]),
+                 "source_title": _str(x.get("source_title"))[:200], "round": rnd}
             if e["promise_link"] not in ledger.PROMISE_LINKS:
                 e["promise_link"] = "none"
             problems = ledger.validate_evidence({**e, "id": "new"})
             key = self.source_key(e["url"])
             if key is None:
                 problems.append("url not in sources")
+            if len(e["quote"]) > CAPS["evidence_quote_chars"]:      # never cut a quote: `resolves` stays honest
+                problems.append(f"quote over {CAPS['evidence_quote_chars']} chars")
+            if kept >= CAPS["evidence"] and not problems:
+                problems.append(f"over the cap of {CAPS['evidence']} evidence per answer")
             if problems:
                 self.fail(e["url"] or "evidence", "dropped: " + "; ".join(problems))
                 continue
@@ -472,7 +496,7 @@ class _Run:
                 continue
             self.quotes.add((key, e["quote"]))
             e["id"] = f"e{len(self.r['evidence']) + 1}"
-            e["source_title"] = e["source_title"] or self.r["sources"][key]["title"]
+            e["source_title"] = self.r["sources"][key]["title"] or e["source_title"]
             self.r["evidence"].append(e)
             row = self.r["matrix"][str(e["category"])]
             row["evidence"].append(e["id"])
@@ -491,7 +515,7 @@ class _Run:
             if _str(u.get("status")) in ledger.STATUSES:
                 row["status"] = _str(u["status"])
             if _str(u.get("note")):
-                row["note"] = _str(u["note"])
+                row["note"] = _words(u["note"], CAPS["note_words"])
 
     def claim_checks(self, raw):
         ids = {c["id"] for c in self.r["site"]["claims"]}
@@ -513,7 +537,7 @@ class _Run:
                         if key and e["url"] == key:
                             self.add_unique(refs, e["id"])
             self.checks[_str(c["claim_id"])] = {"claim_id": _str(c["claim_id"]), "status": status,
-                                                "evidence": refs, "note": _str(c.get("note"))}
+                                                "evidence": refs, "note": _words(c.get("note"), CAPS["note_words"])}
 
     # ---- 4. exit
     def finish(self):
