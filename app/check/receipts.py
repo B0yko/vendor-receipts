@@ -15,8 +15,12 @@ Checks per Evidence (a copy; the research dict is never mutated):
                 made only of common English words counts only with a second anchor or a vendor domain on the page.
                 Wayback URLs are judged by the archived URL.
   says_it       one model question per chunk of 50 receipts that passed both checks above (purpose "says_it",
-                ThreadPoolExecutor(4)): does the quote support this specific claim? A missing id is False
-                ("no verdict"); a failed call is retried once, then its chunk is False ("no verdict: model error").
+                ThreadPoolExecutor(4)): does the quote state the finding's central assertion? The model sees claim,
+                quote, source title, the source's published_date and the receipt's date (dates are the dated
+                check's job). Answer supports true | "partial" | false; "partial" (central assertion yes, a
+                secondary detail no) passes and records says_it_note = "partial: <missing detail>" ('' otherwise).
+                A missing id is False ("no verdict"); a failed call is retried once, then its chunk is False
+                ("no verdict: model error").
   dated         e.date (YYYY, YYYY-MM, YYYY-MM-DD) or the source's published_date; a date equal to the source's
                 fetch day does not count. An empty e.date is filled from published_date. Never rejects alone.
 Plus domain (registrable domain of url), independent (content domain not the vendor's and author_type is not
@@ -100,16 +104,23 @@ vital voice volt vote voyage walk wall watch water wave way wealth weather web w
 wind window wing wire wise wolf wonder wood word work world yard year yellow yes zen zero zone zoom
 """.split())
 
-SYSTEM = """You verify receipts for a vendor due-diligence report. Each receipt is a claim (one plain sentence about
-the product or its vendor) and a verbatim quote from the page at url (titled source_title).
-For each receipt decide whether the quote, read on its own, supports this specific claim:
-- true only if the quote states the claimed fact (or something that plainly entails it) about the same product or
-  company the claim is about;
-- false if the quote is only on the same topic, is weaker or vaguer than the claim, is about another product, company
-  or time, or if the claim adds numbers, dates, causes or judgements the quote does not carry.
+SYSTEM = """You verify receipts for a vendor due-diligence report. Each receipt is a claim (the finding, one plain
+sentence about the product or its vendor) and a verbatim quote from the page at url, with the page's source_title, its
+published_date and the receipt's date field.
+Other checks own whether the quote is on the page, whether the page is about this company, and the date. Judge only
+whether the quote carries the finding:
+- "supports": true when the quote states the finding's central assertion: who or what, and the key fact. Dates may come
+  from the date field, the source_title or the published_date (the dated check owns them), so a date that is not in
+  the quote is no reason to reject. Framing words in the finding ("widely used", "notable", "significant") need no
+  literal match. A plain paraphrase, or a fact the quote plainly entails, counts.
+- "supports": "partial" when the central assertion is supported but a secondary detail is not (an extra number, a
+  cause, a second fact); name that detail in "missing".
+- "supports": false when the quote is unrelated, states the opposite, is about another product or company, or the
+  central fact is missing.
 Answer with one JSON object and nothing else:
-{"results": [{"id": "<receipt id>", "supports": true, "why": "<at most 20 words>"}]}
-with exactly one entry per receipt id you were given."""
+{"results": [{"id": "<receipt id>", "supports": true, "why": "<at most 20 words>", "missing": "<partial only: the
+detail the quote does not carry>"}]}
+where supports is true, "partial" or false, with exactly one entry per receipt id you were given."""
 
 
 def normalise(s):
@@ -291,7 +302,9 @@ def dated(date, src):
 
 def _ask_chunk(chunk, header):
     items = [{"id": r["id"], "claim": str(r.get("text") or "")[:600], "quote": str(r.get("quote") or "")[:1500],
-              "source_title": str(r.get("source_title") or "")[:200], "url": str(r.get("url") or "")}
+              "source_title": str(r.get("_src_title") or r.get("source_title") or "")[:200],
+              "published_date": str(r.get("_src_pub") or "")[:40], "date": str(r.get("date") or "")[:40],
+              "url": str(r.get("url") or "")}
              for r in chunk]
     user = header + "Receipts:\n" + "\n".join(json.dumps(i, ensure_ascii=False) for i in items)
     last = None
@@ -328,10 +341,15 @@ def says_it(receipts, research):
                 r["_says_why"] = f"no verdict: model error ({err})" if err else "no verdict"
                 continue
             sup = v.get("supports")
-            ok = sup is True or (isinstance(sup, str) and sup.strip().lower() == "true")
+            word = sup.strip().lower() if isinstance(sup, str) else ""
+            partial = word in ("partial", "partly", "partially")
+            ok = sup is True or word in ("true", "yes") or partial
             r["checks"]["says_it"] = ok
-            why = v.get("why") if isinstance(v.get("why"), str) else ""
-            r["_says_why"] = "" if ok else ("says it failed: " + (why.strip() or "the quote does not support the claim"))
+            why = v.get("why").strip() if isinstance(v.get("why"), str) else ""
+            r["_says_why"] = "" if ok else ("says it failed: " + (why or "the quote does not support the claim"))
+            if partial:
+                miss = v.get("missing").strip() if isinstance(v.get("missing"), str) else ""
+                r["says_it_note"] = ("partial: " + (miss or why or "a secondary detail is not in the quote"))[:300]
 
 
 def _receipt(e, i):
@@ -339,7 +357,7 @@ def _receipt(e, i):
     if not isinstance(r.get("id"), str) or not r["id"]:
         r["id"] = str(r["id"]) if r.get("id") not in (None, "") else f"x{i + 1}"
     r["checks"] = {"resolves": False, "same_company": False, "says_it": False, "dated": False}
-    r.update(kept=False, why="", domain="", independent=False, dup_of=None)
+    r.update(kept=False, why="", domain="", independent=False, dup_of=None, says_it_note="")
     return r
 
 
@@ -377,6 +395,7 @@ def check(research):
             ok, w = companies[sk]
             r["checks"]["same_company"], why2[id(r)] = ok, w
             r["checks"]["dated"], r["date"] = dated(r.get("date"), src)
+            r["_src_title"], r["_src_pub"] = src.get("title"), src.get("published_date")
             r["domain"] = domain_of(url)
             own = domain_of(content_url(url))
             r["independent"] = bool(own) and own not in domains and r.get("author_type") != "vendor_self"
@@ -397,7 +416,8 @@ def check(research):
         r["kept"] = bool(c["resolves"] and c["same_company"] and c["says_it"])
         r["why"] = ("" if r["kept"] else why1.get(id(r)) or why2.get(id(r)) or r.get("_says_why")
                     or "says it: not asked")
-        r.pop("_says_why", None)
+        for tmp in ("_says_why", "_src_title", "_src_pub"):
+            r.pop(tmp, None)
         try:
             key, here = dup_key(r.get("quote")), url_key(r.get("url"))
             first = seen.get(key) if key else None   # the first kept receipt with this text is the original
