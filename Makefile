@@ -15,9 +15,11 @@ OUT     ?= runs/verdicts.jsonl
 EVALOPT ?= --label overall
 WALL_CAP ?= 1200
 CONC    ?= 8
-export WALL_CAP
+QUICK   ?= data/cases_quick.jsonl
+RUN_ID  ?= $(shell date +%H%M)
+export WALL_CAP CONC RUN_ID
 
-.PHONY: check test smoke eval holdout cases green batch one usage
+.PHONY: check test smoke eval holdout cases green batch one usage quick report baseline control
 # check = unit tests + smoke from the cache: under 30 s. The eval runs separately (never inside a lane's loop).
 check: test smoke
 	@echo "CHECK PASSED $$(date +%H:%M) $$(git rev-parse --short HEAD 2>/dev/null)"
@@ -65,3 +67,21 @@ one:
 
 usage:
 	@$(KC) $(PY) -c 'from app.research import tools; import json; print(json.dumps(tools.usage()))'
+
+# Quick set: 2 Green, 2 Yellow, 2 Red from dev (data/cases_quick.jsonl, made by the Lead from the dev split).
+quick:
+	$(KC) $(RUN) --cases $(QUICK) --out runs/preds_quick_$(RUN_ID).jsonl
+	python3 tools/eval.py $(LABELS) runs/preds_quick_$(RUN_ID).jsonl --split dev $(EVALOPT) | tail -15
+
+# Report of a run (evalkit, lane L4): make report PREDS=runs/preds_dev.jsonl RUN_ID=<id> [SPLIT=dev]
+SPLIT ?= dev
+report:
+	$(KC) $(PY) -m evalkit.report --preds $(PREDS) --split $(SPLIT) --run-dir runs/$(RUN_ID) --out runs/$(RUN_ID)/report.md \
+	  --save runs/eval/report_$(RUN_ID).json $$([ -f runs/eval/report_prev.json ] && echo --prev runs/eval/report_prev.json)
+
+# Plain baseline on the same retrieved data: make baseline RUN_ID=<id>
+baseline:
+	$(KC) $(PY) -m evalkit.baseline --run-dir runs/$(RUN_ID) --out runs/baseline_$(RUN_ID).jsonl
+
+control:
+	$(KC) $(RUN) --cases tests/control_cases.jsonl --out runs/control_$(RUN_ID).jsonl
