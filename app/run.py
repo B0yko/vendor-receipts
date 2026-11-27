@@ -11,14 +11,15 @@ RUN_ID (env) or a timestamp names runs/<run_id>/; each product runs in runs/<run
 (start + wall cap). Each verdict is appended to --out as it completes (locked, flushed). --out is truncated first,
 except with --only, which replaces just the selected cases' lines. At the end: <out stem>.csv and <out stem>.full.csv
 in input order, and runs/<run_id>/manifest.json (git hash and dirty flag, model id, LLM_*_EXTRA values, DISCONFIRM,
-JUDGE_VIEWS, wall cap, concurrency, start/end, mode; per case seconds, overall, error, tool_calls, llm_calls, capped,
-receipts kept/rejected, disconfirmation). Progress goes to stderr: "[3/10] <slug> Yellow 412s".
+JUDGE_VIEWS, AUDIT, wall cap, concurrency, start/end, mode, per step n/median/max seconds; per case seconds, overall,
+error, tool_calls, llm_calls, capped, receipts kept/rejected, disconfirmation, audit, steps). Progress goes to stderr:
+"[3/10] <slug> Yellow 412s (research 220 · check 4 · disconfirm 60 · judge 110 · audit 0)".
 --submit DIR: Stackgini's submission, DIR/stackgini-verdicts.csv (id,url,product,vendor,overall,green_flags,
 yellow_flags,red_flags,reasoning; input order; product and vendor from the input when given) and DIR/traces/<id>.md.
 RECEIPTS_FAKE=1 swaps research for tests/fixtures/research/<slug>.json (RECEIPTS_FIXTURES overrides the folder).
 Concurrency: --concurrency or CONC (default 8); wall cap: --wall-cap or WALL_CAP (default 1200 s).
 """
-import argparse, concurrent.futures as cf, csv, datetime, io, json, os, subprocess, sys, threading, time
+import argparse, concurrent.futures as cf, csv, datetime, io, json, os, statistics, subprocess, sys, threading, time
 
 from app import ledger, model, pipeline
 from app.out import writer
@@ -114,7 +115,24 @@ def _key(v):
     return v.get("id") or ledger.slug(v.get("url", ""))
 
 
-STAT_KEYS = ("tool_calls", "llm_calls", "capped", "receipts_kept", "receipts_rejected", "disconfirmation")
+STAT_KEYS = ("tool_calls", "llm_calls", "capped", "receipts_kept", "receipts_rejected", "disconfirmation", "audit",
+             "steps")
+
+
+def steps_text(v):
+    st = (v.get("stats") or {}).get("steps") or {}
+    parts = [f"{k} {round(x)}" for k, x in st.items() if x is not None]
+    return f" ({' · '.join(parts)})" if parts else ""
+
+
+def steps_overview(verdicts):
+    """Per step over the cases that reached it: n, median and max wall seconds (where the wall cap goes)."""
+    out = {}
+    for k in pipeline.STEPS:
+        xs = sorted(x for x in (((v.get("stats") or {}).get("steps") or {}).get(k) for v in verdicts) if x is not None)
+        if xs:
+            out[k] = {"n": len(xs), "median": round(statistics.median(xs), 1), "max": xs[-1]}
+    return out
 
 
 def case_record(case, v):
@@ -157,7 +175,8 @@ def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="r
             done[0] += 1
             results[c["id"]] = v
             err = f" error: {v['error']}" if v.get("error") else ""
-            print(f"[{done[0]}/{len(cases)}] {c['slug']} {v.get('overall')} {round(v.get('seconds') or 0)}s{err}",
+            print(f"[{done[0]}/{len(cases)}] {c['slug']} {v.get('overall')} {round(v.get('seconds') or 0)}s"
+                  f"{steps_text(v)}{err}",
                   file=sys.stderr, flush=True)
         return v
 
@@ -177,10 +196,11 @@ def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="r
               f"{os.path.join(submit, 'traces')}", file=sys.stderr, flush=True)
     manifest = {"run_id": run_id, "git": git_state(), "model": model.model_id(), "mode": model.mode(),
                 "llm_extra": llm_extras(), "disconfirm": os.environ.get("DISCONFIRM", "1"),
-                "judge_views": os.environ.get("JUDGE_VIEWS", ""), "wall_cap": wall_cap, "concurrency": int(concurrency),
+                "judge_views": os.environ.get("JUDGE_VIEWS", ""), "audit": os.environ.get("AUDIT", "1"),
+                "single_view_below": pipeline.SINGLE_VIEW_BELOW, "wall_cap": wall_cap, "concurrency": int(concurrency),
                 "out": out, "submit": submit, "start": started,
                 "end": datetime.datetime.now().isoformat(timespec="seconds"), "seconds": round(time.time() - t0, 1),
-                "cases": [case_record(c, results[c["id"]]) for c in cases]}
+                "steps": steps_overview(ordered), "cases": [case_record(c, results[c["id"]]) for c in cases]}
     with open(os.path.join(run_root, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
     errors = sum(1 for v in ordered if v.get("error"))
