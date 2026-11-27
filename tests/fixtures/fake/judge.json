@@ -1,0 +1,110 @@
+{
+ "by_marker": {
+  "example.org": {
+   "overall": "Yellow",
+   "reliability": "medium",
+   "reliability_why": "Releases are dated; the one-maintainer finding comes from one independent interview.",
+   "green_flags": [
+    {
+     "text": "Releases continue, latest 2026-11-03",
+     "category": 5,
+     "severity": "minor",
+     "basis": "confirmed",
+     "receipts": [
+      "e2"
+     ]
+    }
+   ],
+   "yellow_flags": [
+    {
+     "text": "One person builds and releases the product (bus factor one)",
+     "category": 6,
+     "severity": "moderate",
+     "basis": "confirmed",
+     "receipts": [
+      "e3"
+     ]
+    }
+   ],
+   "red_flags": [],
+   "reasoning": "Acme Notes is alive with a release on 2026-11-03 [e2]. Its founder alone writes and releases it [e3], which an enterprise buyer must plan around.",
+   "blind_spots": [
+    "No certification found for the enterprise claim."
+   ],
+   "buyer_next_step": "Shortlist after a named check: an escrow or continuity plan.",
+   "vendor_questions": [
+    "Who can ship a fix if the founder is away?",
+    "Do you offer source code escrow?",
+    "Which enterprise customers can we call?"
+   ],
+   "would_flip": "A second engineer with commit access, receipted."
+  },
+  "example.com": {
+   "overall": "Green",
+   "reliability": "medium",
+   "reliability_why": "Dated releases and one independent customer confirmation; scale is the vendor's word.",
+   "green_flags": [
+    {
+     "text": "Releases every two months, latest 2026-10-14",
+     "category": 5,
+     "severity": "minor",
+     "basis": "confirmed",
+     "receipts": [
+      "e2"
+     ]
+    },
+    {
+     "text": "A paying customer confirmed by independent trade press",
+     "category": 7,
+     "severity": "minor",
+     "basis": "confirmed",
+     "receipts": [
+      "e3"
+     ]
+    }
+   ],
+   "yellow_flags": [
+    {
+     "text": "Version 1.x ends support on 2027-06-30 (free move to 2.x)",
+     "category": 4,
+     "severity": "minor",
+     "basis": "confirmed",
+     "receipts": [
+      "e4"
+     ]
+    }
+   ],
+   "red_flags": [],
+   "reasoning": "Acme Ledger ships dated releases [e2] and trade press confirms a paying customer [e3]. The end of 1.x support is announced with a free upgrade [e4].",
+   "blind_spots": [
+    "Customer count of 300 is unconfirmed."
+   ],
+   "buyer_next_step": "Shortlist; ask for the 2.x migration plan.",
+   "vendor_questions": [
+    "How many paying teams use 2.x today?",
+    "Where is customer data hosted?",
+    "Which certifications do you hold?"
+   ],
+   "would_flip": "An authoritative finding against the core promise."
+  }
+ },
+ "default": {
+  "overall": "Yellow",
+  "reliability": "medium",
+  "reliability_why": "Releases are dated; the one-maintainer finding comes from one independent interview.",
+  "green_flags": [],
+  "yellow_flags": [],
+  "red_flags": [],
+  "reasoning": "Too little evidence to call it [e1].",
+  "blind_spots": [
+   "No certification found for the enterprise claim."
+  ],
+  "buyer_next_step": "Shortlist after a named check: an escrow or continuity plan.",
+  "vendor_questions": [
+   "Who can ship a fix if the founder is away?",
+   "Do you offer source code escrow?",
+   "Which enterprise customers can we call?"
+  ],
+  "would_flip": "A second engineer with commit access, receipted."
+ }
+}

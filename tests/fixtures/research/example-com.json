@@ -1,0 +1,465 @@
+{
+ "url": "https://example.com",
+ "slug": "example-com",
+ "started": "2026-11-27T15:30:00",
+ "seconds": 42.0,
+ "identity": {
+  "product": "Acme Ledger",
+  "vendor": "Acme Ledger GmbH",
+  "legal_entity": "Acme Ledger GmbH",
+  "parent": "",
+  "former_names": [],
+  "domains": [
+   "example.com"
+  ],
+  "key_people": [
+   {
+    "name": "Jane Roe",
+    "role": "CEO"
+   }
+  ],
+  "country": "DE",
+  "languages": [
+   "en"
+  ],
+  "same_name_risks": [],
+  "notes": "Invented smoke-test vendor.",
+  "evidence": [
+   "e1"
+  ]
+ },
+ "site": {
+  "core_promise": "Acme Ledger keeps a small team's records in one place.",
+  "segment": "SMB",
+  "claims": [
+   {
+    "id": "c1",
+    "text": "Trusted by 300 small teams",
+    "kind": "customers",
+    "quote": "Trusted by 300 small teams.",
+    "url": "https://example.com/"
+   }
+  ],
+  "inconsistencies": [],
+  "pages": [
+   {
+    "url": "https://example.com/",
+    "status": 200,
+    "chars": 161,
+    "kind": "vendor"
+   },
+   {
+    "url": "https://example.com/changelog",
+    "status": 200,
+    "chars": 195,
+    "kind": "vendor"
+   }
+  ],
+  "signals": {
+   "copyright_year": 2026,
+   "generator": "",
+   "notes": ""
+  }
+ },
+ "matrix": {
+  "1": {
+   "status": "found",
+   "queries": [
+    "\"Acme Ledger\" identity",
+    "\"Acme Ledger GmbH\" identity news"
+   ],
+   "sources": [
+    "https://example.com/"
+   ],
+   "evidence": [
+    "e1"
+   ],
+   "note": "Found; see the evidence."
+  },
+  "2": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" ownership, deals, finances",
+    "\"Acme Ledger GmbH\" ownership, deals, finances news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "3": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" names, licences, portfolio",
+    "\"Acme Ledger GmbH\" names, licences, portfolio news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "4": {
+   "status": "found",
+   "queries": [
+    "\"Acme Ledger\" lifecycle",
+    "\"Acme Ledger GmbH\" lifecycle news"
+   ],
+   "sources": [
+    "https://example.com/changelog"
+   ],
+   "evidence": [
+    "e4"
+   ],
+   "note": "Found; see the evidence."
+  },
+  "5": {
+   "status": "found",
+   "queries": [
+    "\"Acme Ledger\" pulse",
+    "\"Acme Ledger GmbH\" pulse news"
+   ],
+   "sources": [
+    "https://example.com/changelog"
+   ],
+   "evidence": [
+    "e2"
+   ],
+   "note": "Two dated releases in the last four months."
+  },
+  "6": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" scale and team",
+    "\"Acme Ledger GmbH\" scale and team news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "7": {
+   "status": "found",
+   "queries": [
+    "\"Acme Ledger\" customers and social proof",
+    "\"Acme Ledger GmbH\" customers and social proof news"
+   ],
+   "sources": [
+    "https://news.example.net/acme-ledger-review"
+   ],
+   "evidence": [
+    "e3"
+   ],
+   "note": "Found; see the evidence."
+  },
+  "8": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" claim verification",
+    "\"Acme Ledger GmbH\" claim verification news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "9": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" regulators",
+    "\"Acme Ledger GmbH\" regulators news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "10": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" litigation",
+    "\"Acme Ledger GmbH\" litigation news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "11": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" security incidents",
+    "\"Acme Ledger GmbH\" security incidents news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "12": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" ethics, sanctions, geopolitics",
+    "\"Acme Ledger GmbH\" ethics, sanctions, geopolitics news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "13": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" governance and legal entity",
+    "\"Acme Ledger GmbH\" governance and legal entity news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "14": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" site quality",
+    "\"Acme Ledger GmbH\" site quality news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "15": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" founders' history",
+    "\"Acme Ledger GmbH\" founders' history news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "16": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" terms, privacy and their changes",
+    "\"Acme Ledger GmbH\" terms, privacy and their changes news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "17": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" hosting and data residency",
+    "\"Acme Ledger GmbH\" hosting and data residency news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "18": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" technical footprint",
+    "\"Acme Ledger GmbH\" technical footprint news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "19": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" voice of users",
+    "\"Acme Ledger GmbH\" voice of users news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "20": {
+   "status": "not_applicable",
+   "queries": [],
+   "sources": [],
+   "evidence": [],
+   "note": "Closed source; no licence to govern."
+  },
+  "21": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" leadership and workforce",
+    "\"Acme Ledger GmbH\" leadership and workforce news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "22": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" content provenance",
+    "\"Acme Ledger GmbH\" content provenance news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "23": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" commercial terms and exit",
+    "\"Acme Ledger GmbH\" commercial terms and exit news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "24": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Ledger\" platform dependency",
+    "\"Acme Ledger GmbH\" platform dependency news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  }
+ },
+ "claim_checks": [
+  {
+   "claim_id": "c1",
+   "status": "not_found",
+   "evidence": [
+    "e3"
+   ],
+   "note": "One named customer confirmed independently; the count of 300 is not."
+  }
+ ],
+ "evidence": [
+  {
+   "id": "e1",
+   "category": 1,
+   "text": "Acme Ledger is made by Acme Ledger GmbH in Berlin.",
+   "url": "https://example.com/",
+   "quote": "Acme Ledger is built by Acme Ledger GmbH in Berlin.",
+   "date": "",
+   "author_type": "vendor_self",
+   "severity": "minor",
+   "polarity": "neutral",
+   "promise_link": "direct",
+   "hypothesis": "Acme Ledger is made by Acme Ledger GmbH in Berlin.",
+   "source_title": "Acme Ledger: records for small teams",
+   "round": 1
+  },
+  {
+   "id": "e2",
+   "category": 5,
+   "text": "Dated releases continue: 2.4.0 on 2026-10-14 after 2.3.0 on 2026-08-02.",
+   "url": "https://example.com/changelog",
+   "quote": "Version 2.4.0 (2026-10-14): faster search and CSV export.",
+   "date": "2026-10-14",
+   "author_type": "vendor_self",
+   "severity": "minor",
+   "polarity": "positive",
+   "promise_link": "direct",
+   "hypothesis": "Dated releases continue: 2.4.0 on 2026-10-14 after 2.3.0 on 2026-08-02.",
+   "source_title": "Acme Ledger changelog",
+   "round": 1
+  },
+  {
+   "id": "e3",
+   "category": 7,
+   "text": "Independent trade press names a paying customer that confirmed it.",
+   "url": "https://news.example.net/acme-ledger-review",
+   "quote": "now counts the bookkeeping firm Northwind Partners among its paying customers, the firm confirmed",
+   "date": "2026-09-20",
+   "author_type": "trade_press",
+   "severity": "minor",
+   "polarity": "positive",
+   "promise_link": "direct",
+   "hypothesis": "Independent trade press names a paying customer that confirmed it.",
+   "source_title": "Small-team ledgers compared",
+   "round": 2
+  },
+  {
+   "id": "e4",
+   "category": 4,
+   "text": "Version 1.x ends support on 2027-06-30 with a free move to 2.x.",
+   "url": "https://example.com/changelog",
+   "quote": "Acme Ledger 1.x reaches end of support on 2027-06-30; customers move to 2.x at no cost.",
+   "date": "2026-10-14",
+   "author_type": "vendor_against_interest",
+   "severity": "minor",
+   "polarity": "negative",
+   "promise_link": "adjacent",
+   "hypothesis": "Version 1.x ends support on 2027-06-30 with a free move to 2.x.",
+   "source_title": "Acme Ledger changelog",
+   "round": 2
+  }
+ ],
+ "sources": {
+  "https://example.com/": {
+   "text": "Acme Ledger. Keep every invoice, receipt and contract of your team in one ledger. Acme Ledger is built by Acme Ledger GmbH in Berlin. Trusted by 300 small teams.",
+   "kind": "fetch",
+   "title": "Acme Ledger: records for small teams",
+   "published_date": "",
+   "fetched_at": "2026-11-27T15:31:00"
+  },
+  "https://example.com/changelog": {
+   "text": "Changelog. Version 2.4.0 (2026-10-14): faster search and CSV export. Version 2.3.0 (2026-08-02): audit log. Acme Ledger 1.x reaches end of support on 2027-06-30; customers move to 2.x at no cost.",
+   "kind": "fetch",
+   "title": "Acme Ledger changelog",
+   "published_date": "2026-10-14",
+   "fetched_at": "2026-11-27T15:31:00"
+  },
+  "https://news.example.net/acme-ledger-review": {
+   "text": "Trade review, September 2026. Acme Ledger, a Berlin startup, now counts the bookkeeping firm Northwind Partners among its paying customers, the firm confirmed. The product ships a release roughly every two months.",
+   "kind": "extract",
+   "title": "Small-team ledgers compared",
+   "published_date": "2026-09-20",
+   "fetched_at": "2026-11-27T15:31:00"
+  }
+ },
+ "sources_failed": [
+  {
+   "what": "https://example.com/status",
+   "error": "HTTP 404"
+  }
+ ],
+ "rounds": [
+  {
+   "n": 1,
+   "actions": [
+    {
+     "tool": "fetch",
+     "args": {
+      "url": "https://example.com"
+     },
+     "category": 1,
+     "hypothesis": "identity"
+    },
+    {
+     "tool": "search",
+     "args": {
+      "query": "\"Acme Ledger\" release"
+     },
+     "category": 5,
+     "hypothesis": "still built"
+    }
+   ],
+   "new_evidence": 2,
+   "seconds": 18.5
+  },
+  {
+   "n": 2,
+   "actions": [
+    {
+     "tool": "search",
+     "args": {
+      "query": "\"Acme Ledger\" customers"
+     },
+     "category": 7,
+     "hypothesis": "real customers"
+    }
+   ],
+   "new_evidence": 2,
+   "seconds": 21.0
+  }
+ ],
+ "stats": {
+  "tool_calls": 3,
+  "llm_calls": 3,
+  "capped": false
+ }
+}

@@ -1,0 +1,444 @@
+{
+ "url": "https://example.org",
+ "slug": "example-org",
+ "started": "2026-11-27T15:30:00",
+ "seconds": 42.0,
+ "identity": {
+  "product": "Acme Notes",
+  "vendor": "Acme Notes Ltd",
+  "legal_entity": "Acme Notes Ltd",
+  "parent": "",
+  "former_names": [],
+  "domains": [
+   "example.org"
+  ],
+  "key_people": [
+   {
+    "name": "Jane Roe",
+    "role": "CEO"
+   }
+  ],
+  "country": "GB",
+  "languages": [
+   "en"
+  ],
+  "same_name_risks": [],
+  "notes": "Invented smoke-test vendor.",
+  "evidence": [
+   "e1"
+  ]
+ },
+ "site": {
+  "core_promise": "Acme Notes keeps a small team's records in one place.",
+  "segment": "SMB",
+  "claims": [
+   {
+    "id": "c1",
+    "text": "Enterprise ready",
+    "kind": "positioning",
+    "quote": "Enterprise ready",
+    "url": "https://example.org/"
+   }
+  ],
+  "inconsistencies": [],
+  "pages": [
+   {
+    "url": "https://example.org/",
+    "status": 200,
+    "chars": 129,
+    "kind": "vendor"
+   },
+   {
+    "url": "https://example.org/releases",
+    "status": 200,
+    "chars": 73,
+    "kind": "vendor"
+   }
+  ],
+  "signals": {
+   "copyright_year": 2026,
+   "generator": "",
+   "notes": ""
+  }
+ },
+ "matrix": {
+  "1": {
+   "status": "found",
+   "queries": [
+    "\"Acme Notes\" identity",
+    "\"Acme Notes Ltd\" identity news"
+   ],
+   "sources": [
+    "https://example.org/"
+   ],
+   "evidence": [
+    "e1"
+   ],
+   "note": "Found; see the evidence."
+  },
+  "2": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" ownership, deals, finances",
+    "\"Acme Notes Ltd\" ownership, deals, finances news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "3": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" names, licences, portfolio",
+    "\"Acme Notes Ltd\" names, licences, portfolio news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "4": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" lifecycle",
+    "\"Acme Notes Ltd\" lifecycle news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "5": {
+   "status": "found",
+   "queries": [
+    "\"Acme Notes\" pulse",
+    "\"Acme Notes Ltd\" pulse news"
+   ],
+   "sources": [
+    "https://example.org/releases"
+   ],
+   "evidence": [
+    "e2"
+   ],
+   "note": "Found; see the evidence."
+  },
+  "6": {
+   "status": "found",
+   "queries": [
+    "\"Acme Notes\" scale and team",
+    "\"Acme Notes Ltd\" scale and team news"
+   ],
+   "sources": [
+    "https://dev.example.net/acme-notes-maintainer"
+   ],
+   "evidence": [
+    "e3"
+   ],
+   "note": "A single maintainer, confirmed in an interview."
+  },
+  "7": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" customers and social proof",
+    "\"Acme Notes Ltd\" customers and social proof news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "8": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" claim verification",
+    "\"Acme Notes Ltd\" claim verification news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "9": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" regulators",
+    "\"Acme Notes Ltd\" regulators news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "10": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" litigation",
+    "\"Acme Notes Ltd\" litigation news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "11": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" security incidents",
+    "\"Acme Notes Ltd\" security incidents news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "12": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" ethics, sanctions, geopolitics",
+    "\"Acme Notes Ltd\" ethics, sanctions, geopolitics news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "13": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" governance and legal entity",
+    "\"Acme Notes Ltd\" governance and legal entity news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "14": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" site quality",
+    "\"Acme Notes Ltd\" site quality news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "15": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" founders' history",
+    "\"Acme Notes Ltd\" founders' history news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "16": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" terms, privacy and their changes",
+    "\"Acme Notes Ltd\" terms, privacy and their changes news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "17": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" hosting and data residency",
+    "\"Acme Notes Ltd\" hosting and data residency news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "18": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" technical footprint",
+    "\"Acme Notes Ltd\" technical footprint news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "19": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" voice of users",
+    "\"Acme Notes Ltd\" voice of users news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "20": {
+   "status": "not_applicable",
+   "queries": [],
+   "sources": [],
+   "evidence": [],
+   "note": "Closed source; no licence to govern."
+  },
+  "21": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" leadership and workforce",
+    "\"Acme Notes Ltd\" leadership and workforce news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "22": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" content provenance",
+    "\"Acme Notes Ltd\" content provenance news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "23": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" commercial terms and exit",
+    "\"Acme Notes Ltd\" commercial terms and exit news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  },
+  "24": {
+   "status": "searched_not_found",
+   "queries": [
+    "\"Acme Notes\" platform dependency",
+    "\"Acme Notes Ltd\" platform dependency news"
+   ],
+   "sources": [],
+   "evidence": [],
+   "note": "Two searches, nothing relevant beyond the vendor's own pages."
+  }
+ },
+ "claim_checks": [
+  {
+   "claim_id": "c1",
+   "status": "not_found",
+   "evidence": [],
+   "note": "No certification or enterprise customer found."
+  }
+ ],
+ "evidence": [
+  {
+   "id": "e1",
+   "category": 1,
+   "text": "Acme Notes is made by Acme Notes Ltd.",
+   "url": "https://example.org/",
+   "quote": "Made by Acme Notes Ltd.",
+   "date": "",
+   "author_type": "vendor_self",
+   "severity": "minor",
+   "polarity": "neutral",
+   "promise_link": "direct",
+   "hypothesis": "Acme Notes is made by Acme Notes Ltd.",
+   "source_title": "Acme Notes: shared notes for field teams",
+   "round": 1
+  },
+  {
+   "id": "e2",
+   "category": 5,
+   "text": "Dated releases continue: 5.1.2 on 2026-11-03.",
+   "url": "https://example.org/releases",
+   "quote": "5.1.2 (2026-11-03): sync fix.",
+   "date": "2026-11-03",
+   "author_type": "vendor_self",
+   "severity": "minor",
+   "polarity": "positive",
+   "promise_link": "direct",
+   "hypothesis": "Dated releases continue: 5.1.2 on 2026-11-03.",
+   "source_title": "Acme Notes releases",
+   "round": 1
+  },
+  {
+   "id": "e3",
+   "category": 6,
+   "text": "One person builds and releases the product; there is no second engineer with commit access.",
+   "url": "https://dev.example.net/acme-notes-maintainer",
+   "quote": "is still written and released by its founder alone; he says there is no second engineer with commit access",
+   "date": "2026-10-08",
+   "author_type": "trade_press",
+   "severity": "moderate",
+   "polarity": "negative",
+   "promise_link": "direct",
+   "hypothesis": "One person builds and releases the product; there is no second engineer with commit access.",
+   "source_title": "One-person software companies",
+   "round": 2
+  }
+ ],
+ "sources": {
+  "https://example.org/": {
+   "text": "Acme Notes. Shared notes for field teams, offline first. Made by Acme Notes Ltd. Enterprise ready, used by teams in 12 countries.",
+   "kind": "fetch",
+   "title": "Acme Notes: shared notes for field teams",
+   "published_date": "",
+   "fetched_at": "2026-11-27T15:31:00"
+  },
+  "https://example.org/releases": {
+   "text": "Releases. 5.1.2 (2026-11-03): sync fix. 5.1.0 (2026-09-21): offline maps.",
+   "kind": "fetch",
+   "title": "Acme Notes releases",
+   "published_date": "2026-11-03",
+   "fetched_at": "2026-11-27T15:31:00"
+  },
+  "https://dev.example.net/acme-notes-maintainer": {
+   "text": "Interview, October 2026. Acme Notes is still written and released by its founder alone; he says there is no second engineer with commit access.",
+   "kind": "extract",
+   "title": "One-person software companies",
+   "published_date": "2026-10-08",
+   "fetched_at": "2026-11-27T15:31:00"
+  }
+ },
+ "sources_failed": [
+  {
+   "what": "https://example.org/status",
+   "error": "HTTP 404"
+  }
+ ],
+ "rounds": [
+  {
+   "n": 1,
+   "actions": [
+    {
+     "tool": "fetch",
+     "args": {
+      "url": "https://example.org"
+     },
+     "category": 1,
+     "hypothesis": "identity"
+    },
+    {
+     "tool": "search",
+     "args": {
+      "query": "\"Acme Notes\" release"
+     },
+     "category": 5,
+     "hypothesis": "still built"
+    }
+   ],
+   "new_evidence": 2,
+   "seconds": 18.5
+  },
+  {
+   "n": 2,
+   "actions": [
+    {
+     "tool": "search",
+     "args": {
+      "query": "\"Acme Notes\" customers"
+     },
+     "category": 7,
+     "hypothesis": "real customers"
+    }
+   ],
+   "new_evidence": 1,
+   "seconds": 21.0
+  }
+ ],
+ "stats": {
+  "tool_calls": 3,
+  "llm_calls": 3,
+  "capped": false
+ }
+}
