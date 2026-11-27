@@ -80,12 +80,14 @@ the agent's files. Holdout rows are touched only by `make holdout`, once, at the
 ## Lanes (disjoint paths; lanes commit on their branch; Lead merges one diff at a time, then `make check`)
 - Shared (Lead only): `app/ledger.py`, `app/model.py`, `app/__init__.py`, `llm.py`, `cache.py`, `SPEC.md`,
   `Makefile`, `pyproject.toml`, `AGENTS.md`, `README.md`, `tests/test_lib.py`.
-- L1 tool layer (worktree `build/vendor-receipts-l1`, branch `l1`): `app/research/tools.py`,
-  `app/research/__init__.py`, `tests/test_l1_*.py`.
+- L1 tool layer (worktree `build/vendor-receipts-l1`, branch `l1`): `app/research/tools.py`, `tests/test_l1_*.py`.
 - L2 research brain: identity, site read, plan, loop, claim check (worktree `build/vendor-receipts-l2`, branch `l2`):
   `app/research/agent.py`, `app/research/prompts.py`, `tests/test_l2_*.py`.
-- L3 checks, judge, outputs, batch (worktree `build/vendor-receipts-b`, branch `lane-b`): `app/check/`, `app/judge/`,
-  `app/out/`, `app/pipeline.py`, `app/run.py`, `app/cli.py`, `tests/test_l3_*.py`, `tests/fixtures/`,
-  `tests/smoke_cases.jsonl`, `tests/smoke_labels.csv`.
-- L4 evaluation (worktree `build/vendor-receipts-l4`, branch `l4`): `evalkit/`, `tests/test_leak.py`,
+- L3 receipt checks and judge (worktree `build/vendor-receipts-b`, branch `lane-b`): `app/check/` and `app/judge/`
+  (package inits excepted), `tests/test_l3_*.py`.
+- L5 outputs, pipeline, batch (worktree `build/vendor-receipts-l5`, branch `l5`): `app/out/` (init excepted),
+  `app/pipeline.py`, `app/run.py`, `app/cli.py`, `tests/test_l5_*.py`, `tests/fixtures/`, `tests/smoke_cases.jsonl`,
+  `tests/smoke_labels.csv`.
+- L4 evaluation (worktree `build/vendor-receipts-l4`, branch `l4`): `evalkit/`, `tests/test_leak.py`, `tests/leak_allow.txt`,
   `tests/test_l4_*.py`, `tests/control_cases.jsonl`.
+- Package inits `app/research/__init__.py`, `app/check/__init__.py`, `app/judge/__init__.py`, `app/out/__init__.py`: Lead.
