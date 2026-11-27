@@ -4,14 +4,17 @@ identity -> site read -> plan over the 24 categories -> research loop -> claim c
 1. Site read: tools.fetch(url) (a deep URL stays the product), up to 14 same-site pages picked by keyword plus
    /.well-known/security.txt; pages with < 400 chars of text go to one tools.extract batch. Every text lands in
    research["sources"]; site.pages lists every page.
-2. Intake (one model call, purpose "intake"; the buyer's product and vendor names from `hints` are anchors to
+2. Intake (one model call, purpose "intake", in parallel with one call per category group, purpose "plan", for the
+   hypotheses and round-1 actions of that group; merged in fixed group order; the buyer's product and vendor names from `hints` are anchors to
    verify, stored in identity.notes): identity, promise, claims, evidence from the vendor's own pages,
    hypotheses and round-1 actions for all 24 categories (ordered round-robin by category, so a cap trims depth first).
    Answer size is the time cost: prompts.CAPS (intake <= 20k chars, round <= 15k, per-field caps) is said in the
    prompts and enforced here: lists and summary texts are cut; an over-long quote drops its evidence, never cut.
 3. Rounds (<= 4): the actions run on 8 threads, results kept in action order; every retrieved text lands in sources,
-   failures in sources_failed, queries in matrix[cat].queries. One model call (purpose "round") turns this round's
-   results into evidence, matrix updates, claim checks and next actions. Code assigns ids e1.., keeps only evidence that
+   failures in sources_failed, queries in matrix[cat].queries. One model call per category group (purpose "round",
+   in parallel; GROUPS) turns that group's results into evidence, matrix updates of its own rows, claim checks (merged
+   by claim_id; contradicted is never lowered) and next actions; a group with nothing new and no open row sits out, a
+   failed group call keeps its rows as they are. Code assigns ids e1.., keeps only evidence that
    passes ledger.validate_evidence and whose url is in sources, links ids into matrix rows and identity.evidence.
 4. Exit on done, no actions, all rows closed, or a cap (4 rounds, 120 tool calls counting the site read, a deadline
    closer than JUDGE_RESERVE seconds, default 300): stats.capped = True. Open rows close as found (evidence),
@@ -20,7 +23,7 @@ Prompts carry no clocks and keep a fixed order, so a rerun replays from llm.py's
 failure lands in sources_failed and the partial Research is returned.
 Tests patch `agent.tools` with fakes and answer the model through app.model.set_fake("intake" / "round").
 """
-import concurrent.futures, datetime, importlib, json, os, sys, time, traceback, urllib.parse
+import concurrent.futures, datetime, importlib, json, os, sys, threading, time, traceback, urllib.parse
 
 from app import ledger, model
 from app.research import prompts
@@ -36,7 +39,10 @@ MAX_ROUNDS = 4
 MAX_TOOL_CALLS = 120
 MAX_SITE_PAGES = 14
 CAPS = prompts.CAPS          # answer-size caps, said in the prompts and enforced here after parsing
-MAX_NEXT_ACTIONS = CAPS["round_actions"]
+GROUPS = prompts.GROUPS      # A 1-4, B 5-8, C 9-13, D 14-15, E1 16-19, E2 20-24: one model call per group, parallel
+GROUP_OF = prompts.GROUP_OF
+MAX_NEXT_ACTIONS = CAPS["group_round_actions"] * len(GROUPS)
+_CLAIM_RANK = {"not_found": 0, "confirmed": 1, "contradicted": 2}   # a later answer never lowers a claim's status
 SHORT_PAGE = 400
 WORKERS = 8
 SITE_KEYWORDS = ("about", "company", "team", "imprint", "impressum", "legal", "customers", "case-stud", "pricing",
@@ -165,6 +171,7 @@ class _Run:
         self.seen = set()            # executed actions (tool + args)
         self.checks = {}             # claim_id -> latest claim check
         self.quotes = set()          # (url, quote) of kept evidence
+        self.lock = threading.Lock()
         self.table = {n: {"doc": (t or {}).get("doc", ""), "args": (t or {}).get("args", "")}
                       for n, t in (getattr(tools, "TOOLS", None) or {}).items()}
 
@@ -187,7 +194,8 @@ class _Run:
             return list(ex.map(fn, items))   # map keeps the input order: prompts stay deterministic
 
     def ask(self, system, user, purpose):
-        self.r["stats"]["llm_calls"] += 1
+        with self.lock:
+            self.r["stats"]["llm_calls"] += 1
         try:
             ans = model.ask_json(system, user, purpose)
         except Exception as e:  # noqa: BLE001
@@ -284,11 +292,41 @@ class _Run:
 
     # ---- 2. intake
     def intake(self, pages):
-        ans = self.ask(prompts.intake_system(self.table),
-                       prompts.intake_user(self.r["url"], pages, hints=self.hints), "intake")
+        """One intake call (identity, site, vendor-site evidence) and one plan call per group, all in parallel from
+        the same site text; merged in fixed group order -> round-1 actions."""
+        calls = [("intake", None, prompts.intake_system(self.table),
+                  prompts.intake_user(self.r["url"], pages, hints=self.hints))]
+        calls += [("plan", g, prompts.plan_system(self.table),
+                   prompts.intake_user(self.r["url"], pages, hints=self.hints, group=g)) for g in GROUPS]
+        with concurrent.futures.ThreadPoolExecutor(len(calls)) as ex:
+            answers = list(ex.map(lambda c: self.ask(c[2], c[3], c[0]), calls))
+        ans = answers[0]
         if ans is None:
             self.hint_fallback()
-            return []
+        else:
+            self.take_site(ans)
+        acts = []
+        if ans is not None and (ans.get("plan") or ans.get("actions")):    # one-call answer (older fixtures)
+            acts += self.take_plan(ans, None)
+        for (_, g, _s, _u), a in zip(calls[1:], answers[1:]):
+            if a is not None:
+                acts += self.take_plan(a, g)
+        by = {}
+        for a in acts:
+            by.setdefault(a["category"], []).append(a)
+        out, depth, keys = [], 0, set()
+        while len(out) < len(acts) and depth <= max((len(v) for v in by.values()), default=0):
+            for c in by:                     # round-robin by category (group order, then the model's priority):
+                if depth < len(by[c]):       # the cap trims depth, never whole categories
+                    a = by[c][depth]
+                    k = json.dumps([a["tool"], a["args"]], sort_keys=True, ensure_ascii=False, default=str)
+                    if k not in keys:
+                        keys.add(k)
+                        out.append(a)
+            depth += 1
+        return out[:CAPS["intake_actions"]]
+
+    def take_site(self, ans):
         self.merge_identity(ans.get("identity"), overwrite=True)
         self.hint_fallback()
         site = ans.get("site") if isinstance(ans.get("site"), dict) else {}
@@ -312,11 +350,15 @@ class _Run:
         for k in ("copyright_year", "generator", "notes"):
             if _str(sig.get(k)) and not self.r["site"]["signals"].get(k):
                 self.r["site"]["signals"][k] = _words(sig.get(k), CAPS["note_words"])
-        self.take_evidence(ans.get("evidence"), 0)
+        self.take_evidence(ans.get("evidence"), 0, CAPS["evidence"])
+
+    def take_plan(self, ans, group):
+        """A plan answer -> hypotheses and not_applicable rows (the group's categories only) and its actions."""
+        cats = {str(c) for c in GROUPS[group]} if group else {str(c) for c in ledger.CATEGORIES}
         plan = ans.get("plan") if isinstance(ans.get("plan"), dict) else {}
         for k, p in plan.items():
             k = str(_cat(k))
-            if k not in self.r["matrix"] or not isinstance(p, dict):
+            if k not in self.r["matrix"] or k not in cats or not isinstance(p, dict):
                 continue
             self.hyp[k] = [_words(h, CAPS["hypothesis_words"]) for h in p.get("hypotheses") or []
                            if _str(h)][:CAPS["hypotheses"]]
@@ -327,16 +369,14 @@ class _Run:
             elif self.hyp[k]:
                 row["note"] = "hypotheses: " + "; ".join(self.hyp[k])
         acts = self.norm_actions(ans.get("actions"), limit=None)
-        by = {}
-        for a in acts:
-            by.setdefault(a["category"], []).append(a)
-        out, depth = [], 0
-        while len(out) < len(acts):          # round-robin by category (in the model's priority order): the cap
-            for c in by:                     # trims depth, never whole categories
-                if depth < len(by[c]):
-                    out.append(by[c][depth])
-            depth += 1
-        return out[:CAPS["intake_actions"]]
+        if group is None:
+            return acts
+        per, out = {}, []                   # at most 2 per category: one busy category never crowds out another
+        for x in acts:
+            per[x["category"]] = per.get(x["category"], 0) + 1
+            if per[x["category"]] <= CAPS["plan_actions_per_category"]:
+                out.append(x)
+        return out
 
     def hint_fallback(self):
         """Intake gave no identity: the buyer's names stand in (still marked unverified in identity.notes)."""
@@ -389,8 +429,9 @@ class _Run:
         return self.call(tools.run_tool, a["tool"], a["args"])
 
     def ingest(self, actions, results):
-        """Results into sources and matrix rows -> (action summaries, research hints, this round's new source texts)."""
-        items, summary, hints = {}, [], []
+        """Results into sources and matrix rows -> (action summaries, research hints, per action its retrieved
+        [(url, text)])."""
+        summary, hints, gots = [], [], []
         for i, (a, res) in enumerate(zip(actions, results), 1):
             tool, args, row = a["tool"], a["args"], self.r["matrix"][str(a["category"])]
             self.seen.add(json.dumps([tool, args], sort_keys=True, ensure_ascii=False, default=str))
@@ -418,7 +459,7 @@ class _Run:
                         res.get("text"), "wayback")]
             elif tool == "research":
                 if _str(res.get("report")):
-                    hints.append({"n": i, "text": _str(res["report"]) + "\nSources named: " + ", ".join(
+                    hints.append({"n": i, "category": a["category"], "text": _str(res["report"]) + "\nSources named: " + ", ".join(
                         _str(s.get("url")) for s in res.get("sources") or [] if isinstance(s, dict))})
             elif not err:
                 u = _tool_url(tool, args, res)
@@ -427,45 +468,91 @@ class _Run:
             got = [g for g in got if _defrag(g[0]) and _str(g[3])]
             if err:
                 self.fail(f"{tool} {json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}", err)
+            mine = []
             for u, title, date, text, kind in got:
-                u = _defrag(u)
-                new = self.add_source(u, text, kind, title, date)
+                u, text = _defrag(u), _str(text)
+                self.add_source(u, text, kind, title, date)
                 self.add_unique(row["sources"], u)
+                mine.append((u, text))
+            gots.append(mine)
+            summary.append({"n": i, "tool": tool, "args": args, "category": a["category"],
+                            "hypothesis": a["hypothesis"], "results": len(got), "error": err})
+        return summary, hints, gots
+
+    def group_sources(self, cats, actions, gots, before):
+        """The texts this round retrieved for the group's actions that were not known before the round."""
+        items = {}
+        for i, (a, got) in enumerate(zip(actions, gots), 1):
+            if a["category"] not in cats:
+                continue
+            for u, text in got:
+                if text in before.get(u, ""):
+                    continue
                 src = self.r["sources"][u]
                 it = items.setdefault(u, {"url": u, "title": src["title"], "date": src["published_date"],
                                           "kind": src["kind"], "actions": [], "text": ""})
-                if new and new not in it["text"]:
-                    it["text"] += ("\n" if it["text"] else "") + new
+                if text not in it["text"]:
+                    it["text"] += ("\n" if it["text"] else "") + text
                 if i not in it["actions"]:
                     it["actions"].append(i)
-            summary.append({"n": i, "tool": tool, "args": args, "category": a["category"],
-                            "hypothesis": a["hypothesis"], "results": len(got), "error": err})
-        return summary, hints, [it for it in items.values() if it["text"]]
+        return [it for it in items.values() if it["text"]]
+
+    def digest(self, cats, n=60):
+        """At most n evidence lines (id, category, text): the group's own first, then the latest others; id order."""
+        own = [e for e in self.r["evidence"] if e["category"] in cats]
+        other = [e for e in self.r["evidence"] if e["category"] not in cats]
+        keep = own[-n:]
+        keep += other[-(n - len(keep)):] if n > len(keep) else []
+        keep.sort(key=lambda e: int(e["id"][1:]))
+        return [{"id": e["id"], "category": e["category"], "text": e["text"]} for e in keep]
 
     def round(self, n, actions):
+        """Run the actions, then one round call per group in parallel; answers merge in group order (ids too)."""
         t = time.time()
         results = self.parallel(self.run_action, actions)
         self.r["stats"]["tool_calls"] += len(actions)
-        summary, hints, sources = self.ingest(actions, results)
-        view = {"url": self.r["url"], "identity": self.r["identity"], "core_promise": self.r["site"]["core_promise"],
-                "segment": self.r["site"]["segment"], "claims": self.r["site"]["claims"], "matrix": self.r["matrix"],
-                "hypotheses": self.hyp, "evidence": self.r["evidence"], "round": n, "rounds_left": MAX_ROUNDS - n,
-                "tool_calls_left": max(0, MAX_TOOL_CALLS - self.r["stats"]["tool_calls"]), "actions": summary,
-                "hints": hints, "sources": sources}
-        ans = self.ask(prompts.round_system(self.table), prompts.round_user(view), "round")
-        new, nxt, done = 0, [], False
-        if ans is not None:
-            new = self.take_evidence(ans.get("evidence"), n)
-            self.matrix_updates(ans.get("matrix_updates"))
+        before = {u: s["text"] for u, s in self.r["sources"].items()}
+        summary, hints, gots = self.ingest(actions, results)
+        system, calls = prompts.round_system(self.table), []
+        for g, cats in GROUPS.items():
+            srcs = self.group_sources(cats, actions, gots, before)
+            if not srcs and all(self.r["matrix"][str(c)]["status"] != "open" for c in cats):
+                continue                       # nothing new and nothing open: the group sits this round out
+            view = {"url": self.r["url"], "group": g, "identity": self.r["identity"],
+                    "core_promise": self.r["site"]["core_promise"], "segment": self.r["site"]["segment"],
+                    "claims": self.r["site"]["claims"], "matrix": self.r["matrix"], "hypotheses": self.hyp,
+                    "evidence": self.digest(cats), "round": n, "rounds_left": MAX_ROUNDS - n,
+                    "tool_calls_left": max(0, MAX_TOOL_CALLS - self.r["stats"]["tool_calls"]),
+                    "actions": [x for x in summary if x["category"] in cats],
+                    "hints": [h for h in hints if h["category"] in cats], "sources": srcs}
+            calls.append((g, prompts.round_user(view)))
+        with concurrent.futures.ThreadPoolExecutor(max(1, len(calls))) as ex:
+            answers = list(ex.map(lambda c: self.ask(system, c[1], "round"), calls))
+        new, per_group, done = 0, [], bool(calls)
+        for (g, _u), ans in zip(calls, answers):
+            if ans is None:                    # logged by ask(); the group's rows keep their state
+                done = False
+                continue
+            new += self.take_evidence(ans.get("evidence"), n, CAPS["group_evidence"])
+            self.matrix_updates(ans.get("matrix_updates"), GROUPS[g])
             self.claim_checks(ans.get("claim_checks"))
             self.merge_identity(ans.get("identity_updates"), overwrite=False)
-            nxt = self.norm_actions(ans.get("next_actions"), limit=MAX_NEXT_ACTIONS)
-            done = ans.get("done") is True
+            per_group.append(self.norm_actions(ans.get("next_actions"), limit=CAPS["group_round_actions"]))
+            done = done and ans.get("done") is True
+        nxt, keys = [], set()
+        for depth in range(CAPS["group_round_actions"]):   # interleave groups: a tool-call cap trims all evenly
+            for acts in per_group:
+                if depth < len(acts):
+                    k = json.dumps([acts[depth]["tool"], acts[depth]["args"]], sort_keys=True, ensure_ascii=False,
+                                   default=str)
+                    if k not in keys:
+                        keys.add(k)
+                        nxt.append(acts[depth])
         self.r["rounds"].append({"n": n, "actions": actions, "new_evidence": new,
                                  "seconds": round(time.time() - t, 1)})
         return nxt, done
 
-    def take_evidence(self, raw, rnd):
+    def take_evidence(self, raw, rnd, cap):
         kept = 0
         for x in raw or []:
             if not isinstance(x, dict):
@@ -486,8 +573,8 @@ class _Run:
                 problems.append("url not in sources")
             if len(e["quote"]) > CAPS["evidence_quote_chars"]:      # never cut a quote: `resolves` stays honest
                 problems.append(f"quote over {CAPS['evidence_quote_chars']} chars")
-            if kept >= CAPS["evidence"] and not problems:
-                problems.append(f"over the cap of {CAPS['evidence']} evidence per answer")
+            if kept >= cap and not problems:
+                problems.append(f"over the cap of {cap} evidence per answer")
             if problems:
                 self.fail(e["url"] or "evidence", "dropped: " + "; ".join(problems))
                 continue
@@ -506,10 +593,12 @@ class _Run:
             kept += 1
         return kept
 
-    def matrix_updates(self, upd):
+    def matrix_updates(self, upd, cats):
+        """Status and note updates for the group's own rows only (another group's rows are not this call's)."""
+        own = {str(c) for c in cats}
         for k, u in (upd if isinstance(upd, dict) else {}).items():
             k = str(_cat(k))
-            if k not in self.r["matrix"] or not isinstance(u, dict):
+            if k not in own or not isinstance(u, dict):
                 continue
             row = self.r["matrix"][k]
             if _str(u.get("status")) in ledger.STATUSES:
@@ -536,8 +625,14 @@ class _Run:
                     for e in self.r["evidence"]:
                         if key and e["url"] == key:
                             self.add_unique(refs, e["id"])
-            self.checks[_str(c["claim_id"])] = {"claim_id": _str(c["claim_id"]), "status": status,
-                                                "evidence": refs, "note": _words(c.get("note"), CAPS["note_words"])}
+            cid, old = _str(c["claim_id"]), self.checks.get(_str(c["claim_id"]))
+            note = _words(c.get("note"), CAPS["note_words"])
+            if old and _CLAIM_RANK[status] < _CLAIM_RANK[old["status"]]:
+                continue                       # never contradicted -> confirmed, never a found status -> not_found
+            if old and status == old["status"]:
+                refs = old["evidence"] + [x for x in refs if x not in old["evidence"]]
+                note = note or old["note"]
+            self.checks[cid] = {"claim_id": cid, "status": status, "evidence": refs, "note": note}
 
     # ---- 4. exit
     def finish(self):
