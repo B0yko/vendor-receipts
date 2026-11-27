@@ -188,6 +188,12 @@ def resolves(quote, text):
     return True, ""
 
 
+def dup_key(quote):
+    """The text two receipts share when one reposts the other: the first DUP_PREFIX normalised chars."""
+    q = " ".join(_parts(quote)[0]) or normalise(quote)
+    return q[:DUP_PREFIX]
+
+
 def _strip_legal(name):
     words = name.split()
     while len(words) > 1 and words[-1].strip(".,&") in LEGAL_SUFFIXES | {""}:
@@ -393,8 +399,7 @@ def check(research):
                     or "says it: not asked")
         r.pop("_says_why", None)
         try:
-            q = " ".join(_parts(r.get("quote"))[0]) or normalise(r.get("quote"))
-            key, here = q[:DUP_PREFIX], url_key(r.get("url"))
+            key, here = dup_key(r.get("quote")), url_key(r.get("url"))
             first = seen.get(key) if key else None   # the first kept receipt with this text is the original
             if first and first[1] != here:
                 r["dup_of"] = first[0]
