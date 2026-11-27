@@ -53,7 +53,7 @@ def _model():
     return os.environ.get("MODEL_ID", "pi-claude-tether/claude-opus-5-5")
 
 
-RESEARCH_PURPOSES = ("intake", "round")  # the research steps (identity, site read, plan, loop, claim check)
+RESEARCH_PURPOSES = ("intake", "plan", "round")  # the research steps (identity, site read, plan, loop, claim check)
 
 
 def _thinking(purpose=""):

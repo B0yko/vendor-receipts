@@ -52,6 +52,7 @@ class ModelTest(unittest.TestCase):
     def test_research_steps_think_high_judge_xhigh(self):
         self.assertEqual(model._thinking("intake"), "high")
         self.assertEqual(model._thinking("round_retry"), "high")
+        self.assertEqual(model._thinking("plan"), "high")
         self.assertEqual(model._thinking("judge"), "xhigh")
         self.assertEqual(model._thinking("disconfirm"), "xhigh")
 
