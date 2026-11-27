@@ -51,7 +51,8 @@ Verdict (one JSON line per product; the CSV mirrors Stackgini's columns):
    "would_flip", "coverage": {"1": status, ...}, "sources_failed": [], "guards": ["guard log lines"],
    "reasons": [{"text", "url", "quote"}] (every kept flag, red then yellow then green; for tools/eval.py),
    "model", "run_id", "trace": "runs/<run_id>/<slug>/trace.md", "seconds", "error": None | "...",
-   "mode": "live" | "replay" | "fake"}
+   "mode": "live" | "replay" | "fake", "id": "batch id when given", "stats": {per-case counts from the pipeline},
+   "views": [{"view", "overall", "reliability", "key_receipts"}] (three-view judge), "audit": {...} (app/check/audit.py)}
 """
 import re
 import urllib.parse
