@@ -96,6 +96,8 @@ def judge_input(research, receipts):
                 "author_type": r.get("author_type"), "severity": r.get("severity"), "polarity": r.get("polarity"),
                 "promise_link": r.get("promise_link", ""), "independent": bool(r.get("independent")),
                 "dated": bool((r.get("checks") or {}).get("dated"))}
+        if r.get("says_it_note"):
+            line["says_it_note"] = _clip(r["says_it_note"], 300)
         if r["id"] in reposts:
             line["reposts"] = reposts[r["id"]]
         out.append(json.dumps(line, ensure_ascii=False))
