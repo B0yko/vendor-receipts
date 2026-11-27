@@ -10,8 +10,9 @@ verdict["id"].
 RUN_ID (env) or a timestamp names runs/<run_id>/; each product runs in runs/<run_id>/<slug>/ with its own deadline
 (start + wall cap). Each verdict is appended to --out as it completes (locked, flushed). --out is truncated first,
 except with --only, which replaces just the selected cases' lines. At the end: <out stem>.csv and <out stem>.full.csv
-in input order, and runs/<run_id>/manifest.json (git hash and dirty flag, model id, LLM_*_EXTRA values, wall cap,
-concurrency, per-case seconds/overall/error, start/end, mode). Progress goes to stderr: "[3/10] <slug> Yellow 412s".
+in input order, and runs/<run_id>/manifest.json (git hash and dirty flag, model id, LLM_*_EXTRA values, DISCONFIRM,
+JUDGE_VIEWS, wall cap, concurrency, start/end, mode; per case seconds, overall, error, tool_calls, llm_calls, capped,
+receipts kept/rejected, disconfirmation). Progress goes to stderr: "[3/10] <slug> Yellow 412s".
 --submit DIR: Stackgini's submission, DIR/stackgini-verdicts.csv (id,url,product,vendor,overall,green_flags,
 yellow_flags,red_flags,reasoning; input order; product and vendor from the input when given) and DIR/traces/<id>.md.
 RECEIPTS_FAKE=1 swaps research for tests/fixtures/research/<slug>.json (RECEIPTS_FIXTURES overrides the folder).
@@ -113,6 +114,16 @@ def _key(v):
     return v.get("id") or ledger.slug(v.get("url", ""))
 
 
+STAT_KEYS = ("tool_calls", "llm_calls", "capped", "receipts_kept", "receipts_rejected", "disconfirmation")
+
+
+def case_record(case, v):
+    st = v.get("stats") or {}
+    return {"id": case["id"], "url": case["url"], "slug": case["slug"], "seconds": v.get("seconds"),
+            "overall": v.get("overall"), "reliability": v.get("reliability"), "error": v.get("error"),
+            **{k: st.get(k) for k in STAT_KEYS}, "trace": v.get("trace")}
+
+
 def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="runs", research_fn=None,
               replace_only=False, all_cases=None, submit=None):
     """Runs `cases`, appends verdicts to `out`, writes the CSVs, the manifest and (with `submit`) the submission;
@@ -165,12 +176,11 @@ def run_cases(cases, out, concurrency=8, wall_cap=1200, run_id=None, runs_dir="r
         print(f"submission: {csv_path} ({len(rows)} rows of {len(all_cases)} cases), {len(traces)} traces in "
               f"{os.path.join(submit, 'traces')}", file=sys.stderr, flush=True)
     manifest = {"run_id": run_id, "git": git_state(), "model": model.model_id(), "mode": model.mode(),
-                "llm_extra": llm_extras(), "wall_cap": wall_cap, "concurrency": int(concurrency),
+                "llm_extra": llm_extras(), "disconfirm": os.environ.get("DISCONFIRM", "1"),
+                "judge_views": os.environ.get("JUDGE_VIEWS", ""), "wall_cap": wall_cap, "concurrency": int(concurrency),
                 "out": out, "submit": submit, "start": started,
                 "end": datetime.datetime.now().isoformat(timespec="seconds"), "seconds": round(time.time() - t0, 1),
-                "cases": [{"id": c["id"], "url": c["url"], "slug": c["slug"], "seconds": results[c["id"]].get("seconds"),
-                           "overall": results[c["id"]].get("overall"), "error": results[c["id"]].get("error"),
-                           "trace": results[c["id"]].get("trace")} for c in cases]}
+                "cases": [case_record(c, results[c["id"]]) for c in cases]}
     with open(os.path.join(run_root, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
     errors = sum(1 for v in ordered if v.get("error"))
