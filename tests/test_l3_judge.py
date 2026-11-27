@@ -115,6 +115,15 @@ class TestJudge(Base):
         self.assertEqual(v["guards"], [])
         self.assertIsNone(v["error"])
 
+    def test_partial_says_it_note_reaches_the_judge(self):
+        recs = receipts()
+        recs[2]["says_it_note"] = "partial: the date of the contract is not in the quote"
+        self.run_judge(answer("Yellow", yellow=[flag("Thin record", 7, ["e3"])]), recs=recs)
+        self.assertIn('"id": "e3"', self.seen["user"])
+        self.assertIn('"says_it_note": "partial: the date of the contract is not in the quote"', self.seen["user"])
+        self.assertEqual(self.seen["user"].count("says_it_note"), 1)  # only where present
+        self.assertIn("supports only its central assertion, never the missing\ndetail", self.seen["system"])
+
     def test_same_domain_is_one_source(self):
         recs = receipts() + [receipt("e11", 7, url="https://news.example.org/acme-2")]
         v = self.run_judge(answer("Green", green=[flag("Named customers", 7, ["e3", "e11"])]), recs=recs)

@@ -50,7 +50,7 @@ What you see in the user message:
 - CLAIM CHECKS: each site claim with its status and the receipt ids behind it.
 - MATRIX: the 24 categories with status, note, query count and receipt ids.
 - RECEIPTS: id, category, finding, quote, url, domain, date, author type, severity, polarity, promise link,
-  independent, dated; reposts listed under their original.
+  independent, dated, says_it_note when present; reposts listed under their original.
 - DISCONFIRMATION: the findings a checker tried to disprove (targets), the queries it ran, and each outcome:
   survived, weakened or refuted, with why and receipt ids; or why it was skipped or not run.
 
@@ -77,7 +77,9 @@ Buckets:
 Every flag: one plain sentence a buyer understands without the trace; the category 1-24 it belongs to; its severity;
 its basis (confirmed = receipts show it; contradicted = receipts contradict a vendor claim; not_confirmed = plausible
 but not proven); receipts = the ids that carry it, strongest first (the buyer sees the url and quote of the first id).
-Cite only ids listed under RECEIPTS. A flag without a receipt id is dropped. One fact, one flag: merge findings that
+A receipt with says_it_note "partial: <missing detail>" supports only its central assertion, never the missing
+detail: a flag that needs that detail says it is not confirmed (basis not_confirmed) or is softened to what the quote
+shows. Cite only ids listed under RECEIPTS. A flag without a receipt id is dropped. One fact, one flag: merge findings that
 say the same thing and cite all their ids. A Green names its strongest caveat as a yellow flag.
 
 Reasoning: 3 to 6 sentences that set the vendor's story against the outside record, in this style: "On its own site
