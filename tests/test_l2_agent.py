@@ -77,10 +77,10 @@ def intake_answer(n_per_cat=2):
             continue
         actions += [{"tool": "search", "args": {"query": f"Acme Cloud topic {k} q{j}"}, "category": k,
                      "hypothesis": f"h{k}"} for j in range(n_per_cat)]
-    actions += [{"tool": "dns", "args": {"host": "app.acme.example.com"}, "category": 17, "hypothesis": "EU hosting"},
-                {"tool": "wayback", "args": {"url": HOME + "terms"}, "category": 16, "hypothesis": "terms changed"},
-                {"tool": "fail", "args": {"x": 1}, "category": 9, "hypothesis": "a failing tool"},
-                {"tool": "nope", "args": {}, "category": 9, "hypothesis": "unknown tool"}]
+    actions = [{"tool": "dns", "args": {"host": "app.acme.example.com"}, "category": 17, "hypothesis": "EU hosting"},
+               {"tool": "wayback", "args": {"url": HOME + "terms"}, "category": 16, "hypothesis": "terms changed"},
+               {"tool": "fail", "args": {"x": 1}, "category": 9, "hypothesis": "a failing tool"},
+               {"tool": "nope", "args": {}, "category": 9, "hypothesis": "unknown tool"}] + actions
     plan = {str(k): {"hypotheses": [f"hypothesis for {k}"], "not_applicable": ""} for k in ledger.CATEGORIES}
     plan["20"] = {"hypotheses": [], "not_applicable": "closed source, no public code"}
     return {"identity": {"product": "Acme Cloud", "vendor": "Acme", "legal_entity": "Acme GmbH", "parent": "",
@@ -102,11 +102,36 @@ def intake_answer(n_per_cat=2):
             "plan": plan, "actions": actions}
 
 
+def group_of(user):
+    return re.search(r"Your group: (\w+) ", user).group(1)
+
+
+def round_of(user):
+    return int(re.search(r"Round (\d+);", user).group(1))
+
+
+def set_split(ans, plan_seen=None):
+    """The one-call intake answer split as the agent asks it: intake (identity, site, evidence) + one plan per group."""
+    model.set_fake("intake", lambda s, u: {k: v for k, v in ans.items() if k not in ("plan", "actions")})
+
+    def plan(system, user):
+        if plan_seen is not None:
+            plan_seen.append(user)
+        cats = agent.GROUPS[group_of(user)]
+        return {"plan": {k: v for k, v in ans.get("plan", {}).items() if int(k) in cats},
+                "actions": [a for a in ans.get("actions", []) if a["category"] in cats]}
+    model.set_fake("plan", plan)
+
+
 def make_round(prompts_seen):
     def fn(system, user):
         prompts_seen.append(user)
-        n = len(prompts_seen)
+        g, n = group_of(user), round_of(user)
         m = re.search(r"url: (https://news\.example\.org/acme-cloud-topic-2-q0)", user)
+        if n == 1 and g == "B":                                   # a later group never lowers contradicted
+            return {"claim_checks": [{"claim_id": "c1", "status": "confirmed", "evidence": []}], "done": False}
+        if n == 1 and g != "A":
+            return {"done": False}
         if n == 1:
             assert m, "round prompt lacks the numbered source"
             return {"evidence": [
@@ -139,6 +164,8 @@ def make_round(prompts_seen):
 class Base(unittest.TestCase):
     def setUp(self):
         self.addCleanup(model.clear_fakes)
+        for purpose in ("intake", "plan", "round"):              # never a live model call from a test
+            model.set_fake(purpose, lambda s, u: {})
         env = mock.patch.dict(os.environ, {"JUDGE_RESERVE": "300"})
         env.start()
         self.addCleanup(env.stop)
@@ -146,7 +173,9 @@ class Base(unittest.TestCase):
     def run_agent(self, intake=None, deadline=None, calls=None, hints=None):
         seen, intake_seen = [], []
         ans = intake or intake_answer()
-        model.set_fake("intake", lambda s, u: (intake_seen.append(u), ans)[1])
+        set_split(ans)
+        model.set_fake("intake", lambda s, u: (intake_seen.append(u),
+                                               {k: v for k, v in ans.items() if k not in ("plan", "actions")})[1])
         model.set_fake("round", make_round(seen))
         with mock.patch.object(agent, "tools", fake_tools(calls)):
             r = agent.research(HOME, deadline=deadline, hints=hints)
@@ -185,7 +214,7 @@ class TestLoop(Base):
         self.assertEqual([x["n"] for x in r["rounds"]], [1, 2])
         self.assertEqual(r["rounds"][0]["new_evidence"], 2)
         self.assertEqual(len(r["rounds"][1]["actions"]), 1)                   # the duplicate query was dropped
-        self.assertEqual(r["stats"]["llm_calls"], 3)
+        self.assertEqual(r["stats"]["llm_calls"], 1 + 6 + 6 + 6)              # intake, 6 plans, 2 rounds x 6 groups
         self.assertFalse(r["stats"]["capped"])
         self.assertLessEqual(r["stats"]["tool_calls"], agent.MAX_TOOL_CALLS)
         self.assertIn("Acme Cloud topic 4 q1", r["matrix"]["4"]["queries"])
@@ -227,7 +256,7 @@ class TestLoop(Base):
         self.assertEqual(seen, [])
         self.assertEqual(r["rounds"], [])
         self.assertTrue(r["stats"]["capped"])
-        self.assertEqual(r["stats"]["llm_calls"], 1)
+        self.assertEqual(r["stats"]["llm_calls"], 1 + len(agent.GROUPS))
         self.assertEqual(ledger.validate_research(r), [])
         for k, row in r["matrix"].items():
             self.assertTrue(row["status"] != "open" or "not reached (cap)" in row["note"], k)
@@ -239,27 +268,39 @@ class TestLoop(Base):
         self.assertEqual(seen, [])
         with mock.patch.dict(os.environ, {"JUDGE_RESERVE": "10"}):
             r, seen, _ = self.run_agent(deadline=time.time() + 100)
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(seen), 12)
         self.assertFalse(r["stats"]["capped"])
 
     def test_two_runs_identical_prompts(self):
         _, seen1, in1 = self.run_agent()
         _, seen2, in2 = self.run_agent()
-        self.assertEqual(len(seen1), 2)
+        self.assertEqual(len(seen1), 12)
         self.assertEqual(in1, in2)
-        self.assertEqual(seen1, seen2)
+        self.assertEqual(sorted(seen1), sorted(seen2))                       # calls run in parallel: order varies
 
     def test_tool_call_cap(self):
-        r, seen, _ = self.run_agent(intake=intake_answer(n_per_cat=8))
+        n = iter(range(10_000))
+
+        def endless(system, user):                        # 30 fresh actions per group and round, never done
+            g, rn = group_of(user), round_of(user)
+            return {"next_actions": [{"tool": "search", "args": {"query": f"Acme more {g} {rn} {i}"}, "category": 5}
+                                     for i in range(30)], "done": False}
+        set_split(intake_answer(n_per_cat=8))
+        model.set_fake("round", endless)
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME)
         self.assertTrue(r["stats"]["capped"])
         self.assertEqual(r["stats"]["tool_calls"], agent.MAX_TOOL_CALLS)
-        self.assertEqual(len(r["rounds"]), 1)
+        site = 1 + agent.MAX_SITE_PAGES + 1 + 1                  # home, 14 pages, security.txt, one extract
+        self.assertEqual([len(x["actions"]) for x in r["rounds"]],
+                         [40, 30, 30, agent.MAX_TOOL_CALLS - site - 100])   # 6 groups x 5 next actions
         self.assertEqual(ledger.validate_research(r), [])
 
     def test_model_failure_is_partial(self):
         def boom(s, u):
             raise model.ModelError("endpoint down")
         model.set_fake("intake", boom)
+        model.set_fake("plan", boom)
         with mock.patch.object(agent, "tools", fake_tools()):
             r = agent.research(HOME)
         self.assertEqual(ledger.validate_research(r), [])
@@ -304,6 +345,7 @@ class TestHints(Base):
         def boom(s, u):
             raise model.ModelError("endpoint down")
         model.set_fake("intake", boom)
+        model.set_fake("plan", boom)
         with mock.patch.object(agent, "tools", fake_tools()):
             r = agent.research(HOME, hints=self.HINTS)
         self.assertEqual((r["identity"]["product"], r["identity"]["vendor"]), ("Acme Cloud", "Acme"))
@@ -311,10 +353,217 @@ class TestHints(Base):
 
     def test_news_tool_is_a_search(self):
         ans = intake_answer()
-        ans["actions"].append({"tool": "news", "args": {"query": "Acme layoffs"}, "category": 21, "hypothesis": "x"})
+        ans["actions"].insert(0, {"tool": "news", "args": {"query": "Acme layoffs"}, "category": 21, "hypothesis": "x"})
         r, _, _ = self.run_agent(intake=ans)
         self.assertIn("news: Acme layoffs", r["matrix"]["21"]["queries"])
         self.assertEqual(r["sources"]["https://news.example.org/acme-layoffs"]["kind"], "search")
+
+
+def words(s):
+    return len(s.split())
+
+
+class TestCaps(Base):
+    LONG = " ".join(f"w{i}" for i in range(80))
+
+    def oversized_intake(self):
+        a = intake_answer(n_per_cat=8)
+        q = "We are SOC 2 Type II certified since 2015."
+        a["identity"].update(notes=self.LONG, same_name_risks=[f"Acme {i}" for i in range(6)],
+                             key_people=[{"name": f"P{i}", "role": "x"} for i in range(9)])
+        a["site"]["claims"] = [{"text": f"claim {i} " + self.LONG, "kind": "other", "quote": q, "url": HOME}
+                               for i in range(30)]
+        a["site"]["claims"][0]["quote"] = "x" * 201
+        a["site"]["inconsistencies"] = [{"text": self.LONG, "quote": q, "url": HOME} for _ in range(9)]
+        a["site"]["signals"] = {"notes": self.LONG}
+        ev = {"category": 13, "url": HOME, "date": "2015", "author_type": "vendor_self", "severity": "minor",
+              "polarity": "neutral", "hypothesis": self.LONG, "text": self.LONG}
+        a["evidence"] = [{**ev, "quote": "y" * 251}] + [{**ev, "quote": f"Acme quote {i}"} for i in range(20)]
+        a["plan"] = {str(k): {"hypotheses": [self.LONG] * 5} for k in ledger.CATEGORIES}
+        for x in a["actions"]:
+            x["hypothesis"] = self.LONG
+        return a
+
+    def oversized_round(self, prompts_seen):
+        def fn(system, user):
+            prompts_seen.append(user)
+            g = group_of(user)
+            m = re.search(r"url: (https://news\.example\.org/[a-z0-9-]+)", user)
+            if not m:
+                return {}
+            ev = {"category": 2, "url": m.group(1), "author_type": "trade_press", "severity": "moderate",
+                  "polarity": "negative", "text": self.LONG}
+            return {"evidence": [{**ev, "quote": f"Report {i}"} for i in range(20)],
+                    "matrix_updates": {str(k): {"status": "searched_not_found", "note": self.LONG}
+                                       for k in ledger.CATEGORIES if k != 20},
+                    "claim_checks": [{"claim_id": "c1", "status": "not_found", "note": self.LONG}],
+                    "next_actions": [{"tool": "search", "args": {"query": f"Acme next {g} {round_of(user)} {i}"},
+                                      "category": 7, "hypothesis": self.LONG} for i in range(40)],
+                    "identity_updates": {"same_name_risks": [f"Other {i}" for i in range(6)]}, "done": False}
+        return fn
+
+    def test_caps_enforced_on_oversized_answers(self):
+        c, seen = prompts.CAPS, []
+        set_split(self.oversized_intake())
+        model.set_fake("round", self.oversized_round(seen))
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME)
+        self.assertEqual(ledger.validate_research(r), [])
+        ident, site = r["identity"], r["site"]
+        self.assertLessEqual(words(ident["notes"]), c["identity_notes_words"] + 1)
+        self.assertEqual(len(ident["same_name_risks"]), 2 * c["same_name_risks"])   # 3 per answer: intake + round 1
+        self.assertEqual(len(ident["key_people"]), c["key_people"])
+        self.assertEqual(len(site["claims"]), c["claims"])
+        self.assertEqual(site["claims"][0]["quote"], "")                            # over-long: dropped, never cut
+        self.assertTrue(all(words(x["text"]) <= c["claim_text_words"] + 1 for x in site["claims"]))
+        self.assertEqual(len(site["inconsistencies"]), c["inconsistencies"])
+        self.assertLessEqual(words(site["signals"]["notes"]), c["note_words"] + 1)
+        by_round = {}
+        for e in r["evidence"]:
+            by_round[e["round"]] = by_round.get(e["round"], 0) + 1
+            self.assertLessEqual(len(e["quote"]), c["evidence_quote_chars"])
+            self.assertLessEqual(words(e["text"]), c["evidence_text_words"] + 1)
+            self.assertLessEqual(words(e["hypothesis"]), c["evidence_hypothesis_words"] + 1)
+        self.assertEqual(by_round[0], c["evidence"])                              # intake: 12
+        self.assertEqual(by_round[1], c["group_evidence"] * len(agent.GROUPS))     # 6 per group call
+        self.assertNotIn("y" * 251, [e["quote"] for e in r["evidence"]])
+        fails = [f["error"] for f in r["sources_failed"]]
+        self.assertTrue(any("quote over 250 chars" in f for f in fails))
+        self.assertTrue(any("over the cap of 12 evidence" in f for f in fails))
+        self.assertTrue(any("over the cap of 6 evidence" in f for f in fails))
+        for k, h in agent._Run(HOME, None).hyp.items():
+            self.assertEqual(h, [])
+        self.assertEqual(len(r["rounds"][0]["actions"]), c["intake_actions"])
+        self.assertEqual(len(r["rounds"][1]["actions"]), c["group_round_actions"] * len(agent.GROUPS))
+        for x in r["rounds"]:
+            for a in x["actions"]:
+                self.assertLessEqual(words(a["hypothesis"]), c["action_hypothesis_words"] + 1)
+        for k, row in r["matrix"].items():                                      # model notes (20 keeps the code's
+            if k != "20":                                                       # "hypotheses: ..." note)
+                self.assertLessEqual(words(row["note"]), c["note_words"] + 1, k)
+        self.assertLessEqual(words(r["claim_checks"][0]["note"]), c["note_words"] + 1)
+        # plan: 2 hypotheses of <= 15 words per category, shown in the round prompt
+        line = next(x for u in seen for x in u.splitlines() if x.startswith("5. "))
+        hyp = line.split("| hypotheses: ")[1].split(" | note:")[0].split("; ")
+        self.assertEqual(len(hyp), c["hypotheses"])
+        self.assertTrue(all(words(h) <= c["hypothesis_words"] + 1 for h in hyp))
+
+    def test_prompts_state_targets_and_caps(self):
+        table = {"search": {"doc": "web search", "args": ["query"]}}
+        i, pl, r = prompts.intake_system(table), prompts.plan_system(table), prompts.round_system(table)
+        self.assertIn("under 12,000 characters", i)
+        self.assertIn("under 8,000 characters", pl)
+        self.assertIn("under 8,000 characters", r)
+        for p in (i, pl, r):
+            self.assertIn("compact JSON", p)
+            self.assertIn("Never restate the input", p)
+        self.assertIn("evidence <= 12 per answer", i)
+        self.assertIn("evidence <= 6 per answer", r)
+        for p in (i, r):
+            self.assertIn("quote <= 250 chars", p)
+        for cap in ("identity notes <= 40 words", "same_name_risks <= 3", "claims <= 15", "quote <= 200 chars",
+                    "inconsistencies <= 5"):
+            self.assertIn(cap, i)
+        for cap in ("at most 2 hypotheses of <= 15 words", "actions <= 2 per category", "hypothesis <= 12 words"):
+            self.assertIn(cap, pl)
+        self.assertIn("next_actions <= 5", r)
+        self.assertIn("notes <= 20 words", r)
+
+
+class TestGroups(Base):
+    def test_groups_cover_all_categories_once(self):
+        cats = [c for cs in agent.GROUPS.values() for c in cs]
+        self.assertEqual(sorted(cats), list(ledger.CATEGORIES))
+        self.assertEqual(list(agent.GROUPS), ["A", "B", "C", "D", "E1", "E2"])
+
+    def test_parallel_intake_and_plans_merge(self):
+        plan_seen, intake_seen = [], []
+        ans = intake_answer()
+        ans["plan"]["14"] = {"not_applicable": "no site to judge"}
+        set_split(ans, plan_seen)
+        base_plan = model._fakes["plan"]
+
+        def plan(system, user):                                   # group A also tries to plan category 9
+            out = base_plan(system, user)
+            if group_of(user) == "A":
+                out["plan"]["9"] = {"not_applicable": "group A must not close 9"}
+            return out
+        model.set_fake("plan", plan)
+        model.set_fake("intake", lambda s, u: (intake_seen.append(u), {k: v for k, v in ans.items()
+                                                                       if k not in ("plan", "actions")})[1])
+        model.set_fake("round", lambda s, u: {"done": True})
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME, hints={"product": "Acme Cloud", "vendor": "Acme"})
+        self.assertEqual(len(intake_seen), 1)
+        self.assertEqual(sorted(group_of(u) for u in plan_seen), sorted(agent.GROUPS))
+        for u in plan_seen + intake_seen:
+            self.assertIn("[P1] url: " + HOME, u)                                # the same site text for every call
+            self.assertIn('the buyer names this product "Acme Cloud"', u)
+        self.assertNotIn("Your group", intake_seen[0])
+        self.assertEqual(r["identity"]["product"], "Acme Cloud")
+        self.assertEqual(r["matrix"]["14"]["status"], "not_applicable")
+        self.assertEqual(r["matrix"]["20"]["status"], "not_applicable")
+        self.assertNotEqual(r["matrix"]["9"]["note"], "group A must not close 9")
+        first = r["rounds"][0]["actions"]
+        self.assertEqual(len(first), prompts.CAPS["intake_actions"])
+        self.assertEqual([a["category"] for a in first[:4]], [1, 2, 3, 4])      # group order, round-robin
+        self.assertEqual(len({a["category"] for a in first[:23]}), 23)
+        self.assertEqual(r["stats"]["llm_calls"], 1 + 6 + 6)
+
+    def test_failed_group_call(self):
+        set_split(intake_answer())
+        seen = []
+        ok_round = make_round(seen)
+
+        def plan_fails_for_c(system, user, base=model._fakes["plan"]):
+            if group_of(user) == "C":
+                raise model.ModelError("group C down")
+            return base(system, user)
+
+        def round_fails_for_b(system, user):
+            if group_of(user) == "B" and round_of(user) == 1:
+                raise model.ModelError("group B down")
+            out = ok_round(system, user)
+            if round_of(user) == 1 and group_of(user) == "E1":
+                out = {"matrix_updates": {"5": {"status": "found", "note": "not E1's row"},
+                                          "16": {"status": "searched_not_found", "note": "E1 own row"}}}
+            return out
+        model.set_fake("plan", plan_fails_for_c)
+        model.set_fake("round", round_fails_for_b)
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME)
+        self.assertEqual(ledger.validate_research(r), [])
+        fails = [(f["what"], f["error"]) for f in r["sources_failed"]]
+        self.assertIn(("plan", "model: group C down"), fails)
+        self.assertIn(("round", "model: group B down"), fails)
+        first = r["rounds"][0]["actions"]
+        self.assertFalse([a for a in first if a["category"] in agent.GROUPS["C"]])   # C planned nothing
+        self.assertTrue([a for a in first if a["category"] in agent.GROUPS["B"]])
+        self.assertEqual(r["matrix"]["2"]["status"], "found")                        # A still merged
+        self.assertEqual(r["matrix"]["16"]["note"], "E1 own row")
+        self.assertNotEqual(r["matrix"]["5"]["note"], "not E1's row")                 # B's rows keep their state
+        self.assertEqual(r["matrix"]["5"]["status"], "searched_not_found")           # closed by code at exit
+        self.assertEqual(len(r["rounds"]), 2)
+
+    def test_ids_deterministic_and_in_group_order(self):
+        def per_group(system, user):
+            g = group_of(user)
+            urls = re.findall(r"url: (https://news\.example\.org/[a-z0-9-]+)", user)
+            ev = [{"category": agent.GROUPS[g][0], "text": f"finding {g} {i}", "url": u, "quote": "Acme Cloud",
+                   "author_type": "trade_press", "severity": "minor", "polarity": "neutral"}
+                  for i, u in enumerate(urls[:3])]
+            return {"evidence": ev, "done": True}
+        runs = []
+        for _ in range(2):
+            set_split(intake_answer())
+            model.set_fake("round", per_group)
+            with mock.patch.object(agent, "tools", fake_tools()):
+                r = agent.research(HOME)
+            runs.append([(e["id"], e["url"], e["text"]) for e in r["evidence"]])
+        self.assertEqual(runs[0], runs[1])
+        groups = [t.split()[1] for _, _, t in runs[0] if t.startswith("finding")]
+        self.assertEqual(groups, sorted(groups, key=list(agent.GROUPS).index))       # ids assigned in group order
+        self.assertEqual(len(groups), 18)
 
 
 class TestPieces(unittest.TestCase):
@@ -327,7 +576,7 @@ class TestPieces(unittest.TestCase):
 
     def test_prompts_built_from_ledger(self):
         table = {"search": {"doc": "web search", "args": ["query"]}}
-        for p in (prompts.intake_system(table), prompts.round_system(table)):
+        for p in (prompts.intake_system(table), prompts.plan_system(table), prompts.round_system(table)):
             for name, *_ in ledger.CATEGORIES.values():
                 self.assertIn(name, p)
             for k in ledger.AUTHOR_TYPES:
