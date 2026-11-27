@@ -188,7 +188,9 @@ GUARDS = """Four guards in code (app/judge/guards.py), because a model can break
    contradicted and a kept receipt).
 2. User reviews are never the only basis of a flag (a flag whose kept receipts are all user_review is dropped).
 3. Looks never change the color (category 14 findings never make a Red, and never make a Yellow on their own).
-4. A failed source is no signal, never a negative (a yellow or red flag without a kept receipt is dropped)."""
+4. A failed source is no signal, never a negative (a yellow or red flag without a kept receipt is dropped).
+Plus guard D (disconfirmation): a red flag resting only on receipts refuted by disconfirmation moves to yellow; a
+surviving red flag on a weakened target caps reliability at medium."""
 
 
 def new_research(url):

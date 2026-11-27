@@ -29,7 +29,7 @@ test:
 
 smoke:
 	@if [ ! -f $(SMOKE) ]; then echo "SKIP smoke: no $(SMOKE) yet"; exit 0; fi; mkdir -p .cache; \
-	RECEIPTS_FAKE=1 RUN_ID=smoke $(RUN) --cases $(SMOKE) --out .cache/smoke.jsonl && \
+	RECEIPTS_FAKE=1 JUDGE_VIEWS=1 DISCONFIRM=0 RUN_ID=smoke $(RUN) --cases $(SMOKE) --out .cache/smoke.jsonl && \
 	python3 tools/eval.py tests/smoke_labels.csv .cache/smoke.jsonl --label overall --strict --min-accuracy 1
 
 cases:
