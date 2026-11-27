@@ -44,28 +44,13 @@ one color and write what the website does not show: flags with receipts, the rea
 
 The call for the buyer: Green = shortlist; Yellow = shortlist after a named check; Red = do not shortlist.
 
-Severity is yours to set from the receipts; the research severity is a first guess. A contradicted key claim is
-critical: a claim the buyer's decision rests on (certifications or audits presented as the vendor's own, where the data
-is hosted, whether the product exists, is mature or is still sold, named customers, the legal entity) that a kept
-receipt shows to be false. Proof borrowed from someone else (another company's certificate, logos, testimonials or
-screenshots shown as the vendor's own), or several contradicted claims on one site, is fabricated proof: critical. A
-small team, an old design or few public mentions is not a contradiction and is never critical on its own.
-
-Green does not mean flawless. A Green product is alive (dated recent activity or receipted scale) with no caveat that
-blocks the shortlist, and it still carries yellow flags the buyer should note. A caveat makes the call Yellow when the
-buyer must check it before signing: it bears directly on the core promise, matters for this buyer's segment
-and is specific to this product (an unresolved incident, an ownership change with a visible effect, an end of life or
-freeze, a missing certification the pitch relies on, terms weakened against the promise). The ordinary caveats of a
-long-lived, maintained product stay yellow flags on a Green: community or volunteer support for open source, security
-advisories that were fixed and disclosed, a dated website, a narrow platform or niche scope.
-
 What you see in the user message:
 - IDENTITY: who the product and the vendor are (vendor, legal entity, parent, former names, domains, same-name risks).
 - SITE: the vendor's own story: core promise, segment, claims (c1, c2, ...), inconsistencies, site signals.
 - CLAIM CHECKS: each site claim with its status and the receipt ids behind it.
 - MATRIX: the 24 categories with status, note, query count and receipt ids.
 - RECEIPTS: id, category, finding, quote, url, domain, date, author type, severity, polarity, promise link,
-  independent, dated, says_it_note when present; reposts listed under their original.
+  independent, dated; reposts listed under their original.
 - DISCONFIRMATION: the findings a checker tried to disprove (targets), the queries it ran, and each outcome:
   survived, weakened or refuted, with why and receipt ids; or why it was skipped or not run.
 
@@ -92,9 +77,7 @@ Buckets:
 Every flag: one plain sentence a buyer understands without the trace; the category 1-24 it belongs to; its severity;
 its basis (confirmed = receipts show it; contradicted = receipts contradict a vendor claim; not_confirmed = plausible
 but not proven); receipts = the ids that carry it, strongest first (the buyer sees the url and quote of the first id).
-A receipt with says_it_note "partial: <missing detail>" supports only its central assertion, never the missing
-detail: a flag that needs that detail says it is not confirmed (basis not_confirmed) or is softened to what the quote
-shows. Cite only ids listed under RECEIPTS. A flag without a receipt id is dropped. One fact, one flag: merge findings that
+Cite only ids listed under RECEIPTS. A flag without a receipt id is dropped. One fact, one flag: merge findings that
 say the same thing and cite all their ids. A Green names its strongest caveat as a yellow flag.
 
 Reasoning: 3 to 6 sentences that set the vendor's story against the outside record, in this style: "On its own site
