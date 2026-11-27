@@ -6,7 +6,8 @@ Sections: header (url, color, reliability and why, model, run id, seconds, cappe
 receipt ids; 2 the matrix, all 24 rows; 3 claims ledger; 4 decision path (disconfirmation: targets, queries, outcome
 per target with why and new receipts, or the skip reason; judge views with their agreement; flags per bucket with
 their receipts and any disconfirmation outcome, guard log, reasoning, would flip, blind spots, vendor questions, buyer next step; every flag shows its url and full quote,
-whitespace collapsed, never cut, so a checker can find it on the page; a step that did not run says "Not run."); 5 rejected receipts, failed sources and
+whitespace collapsed, never cut, so a checker can find it on the page; the self-audit after the reasoning: removed
+sentences with why, flags without a kept receipt; a step that did not run says "Not run."); 5 rejected receipts, failed sources and
 limits; research rounds; appendix with every kept receipt, full quote and checks.
 """
 import json
@@ -168,6 +169,57 @@ def _views(v):
                         x.get("key_receipts") or []) for x in views])
 
 
+def audit_summary(verdict):
+    a = (verdict or {}).get("audit")
+    if not a:
+        return "not run"
+    if a.get("skipped"):
+        return f"skipped ({_inline(a['skipped'])})"
+    kept = a.get("kept_sentences")
+    kept = len(kept) if isinstance(kept, (list, tuple)) else kept
+    return (f"{'?' if kept is None else kept} sentences kept, {len(a.get('removed') or [])} removed, "
+            f"{len(a.get('uncited_flags') or [])} uncited flags")
+
+
+def _flag_ref(f):
+    if not isinstance(f, dict):
+        return _inline(f)
+    head = _inline(f.get("text") or f.get("flag") or f.get("id") or "?")
+    where = " · ".join(_inline(f[k]) for k in ("bucket", "color", "url") if f.get(k))
+    why = _inline(f.get("why") or f.get("reason") or "")
+    return head + (f" ({where})" if where else "") + (f": {why}" if why else "")
+
+
+def _audit(v):
+    a = v.get("audit")
+    L = ["", "### Audit (after the judge)"]
+    if not a:
+        return L + ["Not run."]
+    if a.get("skipped"):
+        return L + [f"Not run: skipped ({_inline(a['skipped'])})."]
+    cited = a.get("cited_ids") or []
+    L.append(f"Ran: {audit_summary(v)}" + (f"; cited receipts {', '.join(map(str, cited))}" if cited else "") + ".")
+    removed = a.get("removed") or []
+    L += ["", "Removed sentences:"] + ([f"- \"{_inline(x.get('sentence'))}\": {_inline(x.get('why')) or 'no reason given'}"
+                                        if isinstance(x, dict) else f"- \"{_inline(x)}\"" for x in removed] or ["- none"])
+    L += ["", "Flags without a kept receipt on their url:"] + (
+        [f"- {_flag_ref(f)}" for f in a.get("uncited_flags") or []] or ["- none"])
+    known = {"kept_sentences", "removed", "cited_ids", "uncited_flags", "skipped"}
+    for k, x in a.items():
+        if k not in known and x not in (None, "", [], {}):
+            items = x if isinstance(x, list) else [x]
+            L += ["", f"{k.replace('_', ' ').capitalize()}:"] + [
+                f"- {_inline(json.dumps(i, ensure_ascii=False) if isinstance(i, dict) else i)}" for i in items]
+    return L
+
+
+def _steps(v):
+    st = ((v or {}).get("stats") or {}).get("steps") or {}
+    if not st:
+        return []
+    return ["- Steps (wall s): " + " · ".join(f"{k} {'not reached' if x is None else x}" for k, x in st.items())]
+
+
 def render(research, receipts, verdict):
     r, v = research or {}, verdict or {}
     receipts = receipts or []
@@ -183,7 +235,9 @@ def render(research, receipts, verdict):
          f"- Model: {v.get('model', '?')} · mode: {v.get('mode', '?')} · run id: {v.get('run_id', '?')}",
          f"- Seconds: {v.get('seconds', r.get('seconds', '?'))} (research {r.get('seconds', '?')}) · capped: "
          f"{_yn(stats.get('capped'))} · tool calls: {stats.get('tool_calls', 0)} · model calls: {stats.get('llm_calls', 0)}"]
-    L.append(f"- Disconfirmation: {disconfirmation_summary(r)} · judge views: {views_summary(v)}")
+    L += _steps(v)
+    L.append(f"- Disconfirmation: {disconfirmation_summary(r)} · judge views: {views_summary(v)} · audit: "
+             f"{audit_summary(v)}")
     if v.get("error"):
         L.append(f"- Error: {v['error']} (missing evidence is no signal)")
     L += ["", "## 1 Identity and anchors", ""]
@@ -258,6 +312,7 @@ def render(research, receipts, verdict):
                              + (f"; new receipts {', '.join(o.get('evidence'))}" if o.get("evidence") else ""))
     L += ["", "### Guard log"] + ([f"- {g}" for g in v.get("guards") or []] or ["No guard fired."])
     L += ["", "### Reasoning", "", str(v.get("reasoning") or "–")]
+    L += _audit(v)
     L += ["", "### Would flip", "", str(v.get("would_flip") or "–")]
     L += ["", "### Blind spots"] + ([f"- {b}" for b in v.get("blind_spots") or []] or ["None listed."])
     L += ["", "### Vendor questions"] + ([f"{i}. {q}" for i, q in enumerate(v.get("vendor_questions") or [], 1)]
