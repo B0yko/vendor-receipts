@@ -22,7 +22,7 @@ class ModelTest(unittest.TestCase):
         with open(b, "w") as f:
             f.write(FAKE)
         os.chmod(b, os.stat(b).st_mode | stat.S_IEXEC)
-        self.env = mock.patch.dict(os.environ, {"PI_BIN": b, "MODEL_ACCOUNTS": "default,acct3", "RECEIPTS_FAKE": "",
+        self.env = mock.patch.dict(os.environ, {"PI_BIN": b, "MODEL_ACCOUNTS": "default,acct3", "RECEIPTS_FAKE": "", "MODEL_SLOTS_DIR": os.path.join(self.d, "slots0"),
                                                 "REPLAY": ""})
         self.env.start()
         self.cd = mock.patch.object(cache, "CACHE_DIR", os.path.join(self.d, "c"))
@@ -52,6 +52,26 @@ class ModelTest(unittest.TestCase):
     def test_never_acct2(self):
         with mock.patch.dict(os.environ, {"MODEL_ACCOUNTS": "acct2"}):
             self.assertEqual(model._accounts(), ["default"])
+
+    def test_global_slots_serialize_across_threads(self):
+        import threading, time as _t
+        from app import model as m
+        held, peak, lock = [0], [0], threading.Lock()
+        orig = m._global_slot
+
+        def work():
+            with orig():
+                with lock:
+                    held[0] += 1
+                    peak[0] = max(peak[0], held[0])
+                _t.sleep(0.05)
+                with lock:
+                    held[0] -= 1
+        with mock.patch.dict(os.environ, {"MODEL_GLOBAL_CONC": "2", "MODEL_SLOTS_DIR": os.path.join(self.d, "slots")}):
+            ts = [threading.Thread(target=work) for _ in range(6)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+        self.assertEqual(peak[0], 2)
 
     def test_fake_hook(self):
         model.set_fake("judge", lambda s, u: {"x": 1})

@@ -8,7 +8,9 @@ Live: Claude Opus 5.5 at thinking xhigh through the pi CLI on the owner's Claude
 27.11 17:25 with 200k chars: 8.6 s, valid JSON). Every answer is cached by request (system, user, purpose, model,
 thinking) through cache.cached, so a rerun with unchanged prompts is free and a changed judge prompt re-asks only
 the judge; REPLAY=1 turns a miss into an error.
-Concurrency: at most MODEL_CONC (default 6) pi processes at once in this Python process. Accounts: MODEL_ACCOUNTS
+Concurrency: at most MODEL_CONC (default 6) pi processes at once in this Python process, and at most
+MODEL_GLOBAL_CONC (default 16) across every process on this Mac (file-lock slots in MODEL_SLOTS_DIR, default
+/tmp/vendor-receipts-model-slots), so parallel batches cannot exceed one shared cap on the two subscriptions. Accounts: MODEL_ACCOUNTS
 (default "default,acct3": Claude 1 and Claude 2; never acct2, inactive) round-robin per call via
 PI_CLAUDE_TETHER_ACCOUNT; a usage-limit or rate-limit failure retries once on the next account and is logged to
 runs/alerts.log. Every real call is logged to runs/model_calls.jsonl (purpose, seconds, account, sizes, rc).
@@ -19,7 +21,7 @@ form {"by_marker": {"marker text": answer, ...}, "default": answer} picks the fi
 Purposes in use: intake, round, says_it, disconfirm_plan, disconfirm, judge (+ judge_all, judge_external,
 judge_devil), baseline, match, extra, classify.
 """
-import itertools, json, os, re, subprocess, sys, tempfile, threading, time
+import contextlib, fcntl, itertools, json, os, re, subprocess, sys, tempfile, threading, time
 
 import cache
 
@@ -95,13 +97,36 @@ def _log(path, line):
         pass
 
 
+@contextlib.contextmanager
+def _global_slot():
+    """Hold one of MODEL_GLOBAL_CONC file-lock slots (shared by all processes); wait while all are taken."""
+    n = int(os.environ.get("MODEL_GLOBAL_CONC", 16))
+    d = os.environ.get("MODEL_SLOTS_DIR", os.path.join(tempfile.gettempdir(), "vendor-receipts-model-slots"))
+    os.makedirs(d, exist_ok=True)
+    while True:
+        for i in range(n):
+            f = open(os.path.join(d, f"slot{i}.lock"), "w")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                f.close()
+                continue
+            try:
+                yield i
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+                f.close()
+            return
+        time.sleep(0.3)
+
+
 def _pi(system, user, purpose, account):
     cmd = [os.environ.get("PI_BIN", "pi"), "-p", "--no-session", "--no-tools", "--no-mcp", "--no-skills",
            "--no-prompt-templates", "--no-context-files", "--system-prompt", system, "--model", _model(),
            "--thinking", _thinking()]
     env = dict(os.environ, PI_CLAUDE_TETHER_ACCOUNT=account)
     t0 = time.time()
-    with _semaphore():
+    with _semaphore(), _global_slot():
         try:
             p = subprocess.run(cmd, input=user, capture_output=True, text=True, env=env, cwd=tempfile.gettempdir(),
                                timeout=float(os.environ.get("MODEL_TIMEOUT", 900)))
