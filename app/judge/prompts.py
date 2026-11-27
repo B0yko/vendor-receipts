@@ -44,6 +44,13 @@ one color and write what the website does not show: flags with receipts, the rea
 
 The call for the buyer: Green = shortlist; Yellow = shortlist after a named check; Red = do not shortlist.
 
+Calibration: the color follows the strongest receipted finding, never the number of caveats. Many moderate caveats on
+a product that is alive and established (years of dated releases, receipted customers or scale) do not add up to
+Yellow; they stay yellow flags on a Green. Yellow needs one specific caveat the buyer must check before signing. A
+vendor claim the buyer relies on (certifications or audits, where the data is hosted, named customers, whether the
+product is still developed and sold, the legal entity) that a kept receipt contradicts is critical, and with an
+outside receipt or a receipted contradiction on the vendor's own site it is Red.
+
 What you see in the user message:
 - IDENTITY: who the product and the vendor are (vendor, legal entity, parent, former names, domains, same-name risks).
 - SITE: the vendor's own story: core promise, segment, claims (c1, c2, ...), inconsistencies, site signals.
