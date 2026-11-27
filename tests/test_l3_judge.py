@@ -1,5 +1,6 @@
 """Lane L3: the judge and the four guards (offline; the model is faked with model.set_fake("judge"))."""
-import os, sys, unittest
+import os, sys, threading, unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from app import ledger, model  # noqa: E402
@@ -68,9 +69,14 @@ def answer(overall, red=(), yellow=(), green=(), **kw):
 
 
 class Base(unittest.TestCase):
+    """JUDGE_VIEWS=1 unless a test sets it; a live model call fails the test instead of reaching the pi CLI."""
     def setUp(self):
         self.addCleanup(model.clear_fakes)
         self.seen = {}
+        for p in (mock.patch.dict(os.environ, {"JUDGE_VIEWS": "1", "RECEIPTS_FAKE": "", "REPLAY": ""}),
+                  mock.patch.object(model, "_ask", side_effect=AssertionError("live model call in a test"))):
+            p.start()
+            self.addCleanup(p.stop)
 
     def run_judge(self, ans, res=None, recs=None):
         def fake(system, user):
@@ -247,6 +253,175 @@ class TestGuards(Base):
              "yellow_flags": [], "green_flags": [], "blind_spots": []}
         out = guards.apply(v, research(), recs)
         self.assertEqual((out["overall"], out["call"]), ("Yellow", "Yellow"))
+
+
+class TestDisconfirmation(Base):
+    def test_judge_sees_disconfirmation_outcomes_with_kept_ids_only(self):
+        res = research()
+        res["disconfirmation"] = {"targets": [{"id": "e9", "text": "ordered to stop selling"}], "queries": ["q1", "q2"],
+                                  "outcomes": [{"target": "e9", "outcome": "survived", "why": "no appeal found",
+                                                "evidence": ["e3", "e5"]}]}
+        self.run_judge(answer("Yellow", yellow=[flag("Thin record", 7, ["e3"])]))
+        self.assertIn("DISCONFIRMATION", self.seen["system"])
+        self.run_judge(answer("Yellow", yellow=[flag("Thin record", 7, ["e3"])]), res=res)
+        user = self.seen["user"]
+        self.assertIn("targets: 1; queries run: 2", user)
+        self.assertIn('{"target": "e9", "outcome": "survived", "why": "no appeal found", "receipts": ["e3"]}', user)
+        res["disconfirmation"] = {"skipped": "no critical finding"}
+        self.run_judge(answer("Yellow", yellow=[flag("Thin record", 7, ["e3"])]), res=res)
+        self.assertIn("DISCONFIRMATION (attempts to disprove the decisive findings):\n(skipped: no critical finding)",
+                      self.seen["user"])
+        self.run_judge(answer("Yellow", yellow=[flag("Thin record", 7, ["e3"])]))
+        self.assertIn("DISCONFIRMATION (attempts to disprove the decisive findings):\n(not run)", self.seen["user"])
+
+    def test_refuted_target_cannot_carry_a_red(self):
+        res = research()
+        res["disconfirmation"] = {"targets": ["e9"], "queries": ["q"],
+                                  "outcomes": [{"target": "e9: ordered to stop selling", "outcome": "refuted",
+                                                "why": "order was lifted", "evidence": ["e3"]}]}
+        v = self.run_judge(answer("Red", red=[flag("Ordered to stop selling", 9, ["e9"], "critical")]), res=res)
+        self.assertEqual((v["overall"], v["red_flags"]), ("Yellow", []))
+        self.assertEqual([f["text"] for f in v["yellow_flags"]], ["Ordered to stop selling"])
+        self.assertTrue(any(g.startswith("D moved red flag 'Ordered to stop selling'") for g in v["guards"]))
+
+    def test_weakened_target_lowers_reliability(self):
+        res = research()
+        res["disconfirmation"] = {"targets": ["e9"], "queries": ["q"],
+                                  "outcomes": [{"target": {"id": "e9"}, "outcome": "weakened", "why": "under appeal",
+                                                "evidence": []}]}
+        v = self.run_judge(answer("Red", red=[flag("Ordered to stop selling", 9, ["e9"], "critical")],
+                                  reliability="high"), res=res)
+        self.assertEqual((v["overall"], v["reliability"]), ("Red", "medium"))
+        self.assertTrue(any(g.startswith("D reliability high -> medium") for g in v["guards"]))
+
+
+class TestViews(Base):
+    """JUDGE_VIEWS=3: three views in parallel (judge_all, judge_external, judge_devil), then the reconcile (judge)."""
+    def setUp(self):
+        super().setUp()
+        os.environ["JUDGE_VIEWS"] = "3"
+        self.calls = []
+
+    def fakes(self, views, final):
+        def view(purpose):
+            def fn(system, user):
+                self.calls.append(purpose)
+                self.seen[purpose] = (system, user)
+                a = views.get(purpose)
+                if isinstance(a, Exception):
+                    raise a
+                barrier.wait()  # breaks (BrokenBarrierError) unless the answering views run at the same time
+                return a
+            return fn
+        barrier = threading.Barrier(max(1, sum(not isinstance(a, Exception) for a in views.values())), timeout=5)
+        for p in ("judge_all", "judge_external", "judge_devil"):
+            model.set_fake(p, view(p))
+
+        def reconcile(system, user):
+            self.calls.append("judge")
+            self.seen["judge"] = (system, user)
+            if isinstance(final, Exception):
+                raise final
+            return final
+        model.set_fake("judge", reconcile)
+
+    def run_views(self, views, final, res=None):
+        self.fakes(views, final)
+        v = judge.judge(res or research(), receipts())
+        self.assertEqual(ledger.validate_verdict(v), [])
+        self.assertEqual(v["call"], v["overall"])
+        return v
+
+    def yellow(self, rel="medium", ids=("e3",)):
+        return answer("Yellow", yellow=[flag("Thin record", 7, list(ids))], reliability=rel)
+
+    def test_agreement_floors_reliability_and_says_so(self):
+        v = self.run_views({"judge_all": self.yellow("high", ("e3", "e1")), "judge_external": self.yellow("medium"),
+                            "judge_devil": self.yellow("high") | {"argued_against": "Yellow", "argued_for": "Green"}},
+                           self.yellow("low"))
+        self.assertEqual(self.calls[-1], "judge")
+        self.assertEqual(sorted(self.calls[:3]), ["judge_all", "judge_devil", "judge_external"])
+        self.assertEqual(v["views"], [{"view": "all", "overall": "Yellow", "reliability": "high", "key_receipts": ["e3", "e1"]},
+                                      {"view": "external", "overall": "Yellow", "reliability": "medium", "key_receipts": ["e3"]},
+                                      {"view": "devil", "overall": "Yellow", "reliability": "high", "key_receipts": ["e3"]}])
+        self.assertEqual((v["overall"], v["reliability"]), ("Yellow", "medium"))
+        self.assertTrue(v["reliability_why"].startswith("3/3 views agree; "))
+        self.assertIn("views: reliability low -> medium, 3/3 views agree", v["guards"])
+        # each view's prompt and input
+        self.assertEqual(self.seen["judge_all"][0], prompts.SYSTEM)
+        self.assertEqual(self.seen["judge_devil"][0], prompts.VIEW_SYSTEM["devil"])
+        self.assertIn("devil's advocate", self.seen["judge_devil"][0])
+        ext = self.seen["judge_external"][1]
+        for vid in ("e2", "e3", "e9", "e13"):  # independent, or the vendor's statement against interest
+            self.assertIn(f'"id": "{vid}"', ext)
+        for vid in ("e1", "e8", "e10", "e12"):  # vendor_self, or on the vendor's domain
+            self.assertNotIn(f'"id": "{vid}"', ext)
+        self.assertIn('"id": "e1"', self.seen["judge_all"][1])
+        system, user = self.seen["judge"]
+        self.assertEqual(system, prompts.RECONCILE_SYSTEM)
+        self.assertIn("VIEWS (independent judge answers on this research):", user)
+        self.assertIn('devil: {"overall": "Yellow"', user)
+        self.assertIn('"argued_for": "Green"', user)
+
+    def test_model_written_agreement_is_not_repeated(self):
+        v = self.run_views({p: self.yellow() for p in ("judge_all", "judge_external", "judge_devil")},
+                           self.yellow() | {"reliability_why": "3/3 views agree; one source per flag [e3]"})
+        self.assertEqual(v["reliability_why"], "3/3 views agree; one source per flag [e3]")
+
+    def test_disagreement_lowers_reliability_and_is_named(self):
+        green = answer("Green", green=[flag("Monthly releases", 5, ["e2"])], reliability="high")
+        red = answer("Red", red=[flag("Ordered to stop selling", 9, ["e9"], "critical")], reliability="high")
+        v = self.run_views({"judge_all": green, "judge_external": self.yellow(), "judge_devil": red},
+                           self.yellow("high"))
+        self.assertEqual((v["overall"], v["reliability"]), ("Yellow", "low"))  # three colors: low
+        self.assertTrue(v["reliability_why"].startswith("views disagree: all Green, external Yellow, devil Red; "))
+        self.assertEqual([(x["view"], x["overall"], x["key_receipts"]) for x in v["views"]],
+                         [("all", "Green", ["e2"]), ("external", "Yellow", ["e3"]), ("devil", "Red", ["e9"])])
+        self.calls.clear()
+        v = self.run_views({"judge_all": self.yellow(), "judge_external": self.yellow(), "judge_devil": green},
+                           self.yellow("high"))
+        self.assertEqual(v["reliability"], "medium")  # two colors: at most medium
+        self.assertIn("views disagree: all Yellow, external Yellow, devil Green", v["reliability_why"])
+
+    def test_failed_view_is_skipped(self):
+        v = self.run_views({"judge_all": self.yellow(), "judge_external": model.ModelError("pi failed: timeout"),
+                            "judge_devil": self.yellow()}, self.yellow())
+        self.assertEqual([x["view"] for x in v["views"]], ["all", "devil"])
+        self.assertIn("views: external failed, skipped: pi failed: timeout", v["guards"])
+        self.assertTrue(v["reliability_why"].startswith("2/2 views agree (1 failed); "))
+        self.assertNotIn("external:", self.seen["judge"][1])
+        self.assertIsNone(v["error"])
+
+    def test_every_view_failed_falls_back_to_one_call(self):
+        v = self.run_views({p: model.ModelError("down") for p in ("judge_all", "judge_external", "judge_devil")},
+                           self.yellow())
+        self.assertEqual(self.calls.count("judge"), 1)
+        self.assertEqual(self.seen["judge"][0], prompts.SYSTEM)  # the plain judge, not the reconcile
+        self.assertEqual(self.seen["judge"][1], judge.judge_input(research(), receipts()))
+        self.assertEqual(v["views"], [])
+        self.assertIn("views: every view failed, one plain judge call instead", v["guards"])
+        self.assertEqual(v["yellow_flags"][0]["url"], "https://news.example.org/acme")
+
+    def test_failed_reconcile_keeps_the_all_view(self):
+        green = answer("Green", green=[flag("Monthly releases", 5, ["e2"])], reliability="high")
+        v = self.run_views({"judge_all": green, "judge_external": green, "judge_devil": self.yellow()},
+                           model.ModelError("reconcile down"))
+        self.assertEqual(v["overall"], "Green")
+        self.assertTrue(any(g.startswith("views: reconcile failed (reconcile down), the all view's answer stands")
+                            for g in v["guards"]))
+        self.assertIsNone(v["error"])
+
+    def test_judge_views_1_is_one_plain_call(self):
+        os.environ["JUDGE_VIEWS"] = "1"
+        self.fakes({p: AssertionError(p + " must not run") for p in ("judge_all", "judge_external", "judge_devil")},
+                   self.yellow())
+        v = judge.judge(research(), receipts())
+        self.assertEqual(self.calls, ["judge"])
+        self.assertEqual(self.seen["judge"], (prompts.SYSTEM, judge.judge_input(research(), receipts())))
+        self.assertEqual((v["views"], v["reliability"], v["reliability_why"]), ([], "medium", "one source per flag [e2]"))
+        self.assertFalse(any(g.startswith("views:") for g in v["guards"]))
+        self.assertEqual(ledger.validate_verdict(v), [])
+        self.assertEqual(judge.judge(research(), receipts(), views=1)["views"], [])
 
 
 if __name__ == "__main__":
