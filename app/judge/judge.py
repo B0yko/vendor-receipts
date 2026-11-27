@@ -4,8 +4,19 @@ The model sees only kept receipts (reposts listed under their original), identit
 matrix statuses with notes: never raw sources, never rejected receipts. Code, not the model, builds each Flag from its
 receipt ids (url, quote, date, author from the first kept id; corroboration from kept non-repost receipts on different
 registrable domains; unknown ids dropped), then app/judge/guards.py corrects flags and color.
+
+Views (env JUDGE_VIEWS, default 3; 1 = one call, purpose "judge"): up to three judge calls in parallel, "all" (every kept
+receipt, purpose judge_all), "external" (only kept receipts that are independent and not vendor_self, plus
+vendor_against_interest; purpose judge_external) and "devil" (a devil's advocate for the other color; judge_devil),
+then one reconcile call (purpose "judge") that sees the research and the view answers and writes the final answer.
+A failed view is skipped (logged in verdict["guards"]); if every view fails, one plain judge call; if the reconcile
+fails, the "all" (else "external") view answer stands. Agreement of the view colors puts "N/N views agree" into
+reliability_why and floors reliability at the lowest view reliability; disagreement caps it (two colors: medium, three:
+low) and is named in reliability_why. verdict["views"] = [{"view", "overall", "reliability", "key_receipts"}]
+([] for one call). The guards run once, on the final answer.
 """
-import json
+import json, os
+from concurrent.futures import ThreadPoolExecutor
 
 from app import ledger, model
 from app.judge import guards, prompts
@@ -90,9 +101,26 @@ def judge_input(research, receipts):
         out.append(json.dumps(line, ensure_ascii=False))
     if not kept:
         out.append("(none: no receipt survived the checks)")
+    out += ["", "DISCONFIRMATION (attempts to disprove the decisive findings):"] + _disconfirmation(research, keep)
     failed = research.get("sources_failed", [])
     out += ["", f"FAILED SOURCES (no signal, never a negative): {len(failed)}"]
     return "\n".join(out)
+
+
+def _disconfirmation(research, keep):
+    d = research.get("disconfirmation")
+    if not isinstance(d, dict) or not d:
+        return ["(not run)"]
+    if d.get("skipped"):
+        return [f"(skipped: {d['skipped']})"]
+    targets, queries = d.get("targets") or [], d.get("queries") or []
+    out = [f"targets: {len(targets)}; queries run: {len(queries)}"]
+    out += ["target: " + (t if isinstance(t, str) else json.dumps(t, ensure_ascii=False)) for t in targets]
+    for o in d.get("outcomes") or []:
+        if isinstance(o, dict):
+            out.append(json.dumps({"target": o.get("target"), "outcome": o.get("outcome"), "why": _clip(o.get("why"), 300),
+                                   "receipts": keep(_ids(o.get("evidence")))}, ensure_ascii=False))
+    return out
 
 
 def build_flag(f, by_id):
@@ -177,17 +205,143 @@ def build_verdict(research, receipts, ans, error=None):
     return v
 
 
-def judge(research, receipts):
-    """-> Verdict. A failed model call yields a Yellow with low reliability and `error` set (the batch goes on)."""
-    error = None
+VIEWS = (("all", "judge_all"), ("external", "judge_external"), ("devil", "judge_devil"))
+_REL = {r: i for i, r in enumerate(ledger.RELIABILITY)}  # high 0, medium 1, low 2
+
+
+def external_receipts(receipts):
+    """The external view's receipts: kept, and independent and not vendor_self, or vendor_against_interest."""
+    return [r for r in receipts if r.get("kept") and ((r.get("independent") and r.get("author_type") != "vendor_self")
+                                                       or r.get("author_type") == "vendor_against_interest")]
+
+
+def _color(a):
+    c = str(a.get("overall") or "").strip().capitalize()
+    return c if c in ledger.COLORS else None
+
+
+def _rel(a):
+    r = str(a.get("reliability") or "").strip().lower()
+    return r if r in ledger.RELIABILITY else "low"
+
+
+def _ask(system, user, purpose):
+    """-> (answer dict, None) or (None, error text)."""
     try:
-        ans = model.ask_json(prompts.SYSTEM, judge_input(research, receipts), purpose="judge")
+        a = model.ask_json(system, user, purpose=purpose)
     except model.ModelError as e:
-        ans, error = {}, f"judge: {e}"
-    if error:
-        ans = {"overall": "Yellow", "reliability": "low",
-               "reliability_why": "the judge model call failed, so the color is the default, not a judgement",
-               "reasoning": "The judge model call failed; no judgement was made on the receipts."}
-    v = guards.apply(build_verdict(research, receipts, ans, error), research, receipts)
+        return None, str(e)
+    return (a, None) if isinstance(a, dict) else (None, f"answer is {type(a).__name__}")
+
+
+def key_receipts(ans, by_id, n=5):
+    """The ids a view's color rests on: its own color's bucket first (red under Yellow too), then the rest."""
+    order = {"Red": ("red_flags", "yellow_flags", "green_flags"), "Yellow": ("yellow_flags", "red_flags", "green_flags"),
+             "Green": ("green_flags", "yellow_flags", "red_flags")}.get(_color(ans), BUCKETS)
+    out = []
+    for b in order:
+        for f in ans.get(b) or []:
+            for i in _ids(f.get("receipts")) if isinstance(f, dict) else []:
+                if i in by_id and by_id[i].get("kept") and i not in out:
+                    out.append(i)
+    return out[:n]
+
+
+def reconcile_input(user, answers):
+    """The reconcile call's user text: the research as the 'all' view saw it, then each view's answer."""
+    keys = ("overall", "reliability", "reliability_why", "red_flags", "yellow_flags", "green_flags", "reasoning",
+            "blind_spots", "would_flip", "argued_against", "argued_for")
+    out = [user, "", "VIEWS (independent judge answers on this research):"]
+    for name, a in answers.items():
+        out.append(f"{name}: " + json.dumps({k: a[k] for k in keys if k in a}, ensure_ascii=False))
+    return "\n".join(out)
+
+
+def _views(research, receipts, user, n, log):
+    """-> (final answer or None, views list). None means every view failed: the caller makes one plain call."""
+    plan = VIEWS[:n]
+    users = {"all": user, "devil": user, "external": judge_input(research, external_receipts(receipts))}
+    with ThreadPoolExecutor(len(plan)) as ex:
+        futs = {name: ex.submit(_ask, prompts.VIEW_SYSTEM[name], users[name], purpose) for name, purpose in plan}
+    answers = {}
+    for name, _p in plan:
+        a, err = futs[name].result()
+        if err is None and _color(a) is None:
+            err = f"overall {a.get('overall')!r} is not a color"
+        if err:
+            log.append(f"views: {name} failed, skipped: {_clip(err, 200)}")
+        else:
+            answers[name] = a
+    if not answers:
+        log.append("views: every view failed, one plain judge call instead")
+        return None, []
+    by_id = {r["id"]: r for r in receipts if r.get("id")}
+    views = [{"view": k, "overall": _color(a), "reliability": _rel(a), "key_receipts": key_receipts(a, by_id)}
+             for k, a in answers.items()]
+    final, err = _ask(prompts.RECONCILE_SYSTEM, reconcile_input(user, answers), "judge")
+    if err:
+        pick = next((k for k in ("all", "external") if k in answers), None)
+        if pick is None:
+            log.append(f"views: reconcile failed ({_clip(err, 200)}) and only the devil view answered, one plain "
+                       f"judge call instead")
+            return None, views
+        log.append(f"views: reconcile failed ({_clip(err, 200)}), the {pick} view's answer stands")
+        final = answers[pick]
+    return final, views
+
+
+def apply_agreement(v, views, n):
+    """Agreement floors reliability at the lowest view's; disagreement caps it; both are named in reliability_why."""
+    if not views:
+        return v
+    colors = [x["overall"] for x in views]
+    k = len(views)
+    if k < 2:
+        note = f"1 of {n} views answered ({views[0]['view']} {colors[0]})"
+    elif len(set(colors)) == 1 and colors[0] == v["overall"]:
+        note = f"{k}/{k} views agree" + (f" ({n - k} failed)" if k < n else "")
+        floor = max((x["reliability"] for x in views), key=_REL.get)
+        if _REL[floor] < _REL[v["reliability"]]:
+            v["guards"].append(f"views: reliability {v['reliability']} -> {floor}, {note}")
+            v["reliability"] = floor
+    else:
+        cap = "low" if len(set(colors) | {v["overall"]}) >= 3 else "medium"
+        note = "views disagree: " + ", ".join(f"{x['view']} {x['overall']}" for x in views)
+        if len(set(colors)) == 1:
+            note = f"the reconcile chose {v['overall']} against {k}/{k} views ({colors[0]})"
+        if _REL[v["reliability"]] < _REL[cap]:
+            v["guards"].append(f"views: reliability {v['reliability']} -> {cap}, {note}")
+            v["reliability"] = cap
+    agreed = note.endswith("views agree") or " views agree (" in note
+    if not (agreed and note.split(" (")[0] in v["reliability_why"]):
+        v["reliability_why"] = f"{note}; {v['reliability_why']}".rstrip("; ")
+    return v
+
+
+def judge(research, receipts, views=None):
+    """-> Verdict. views (default env JUDGE_VIEWS, 3) = number of judge views; 1 = one plain call.
+    A failed model call yields a Yellow with low reliability and `error` set (the batch goes on)."""
+    try:
+        n = int(views if views is not None else os.environ.get("JUDGE_VIEWS") or 3)
+    except ValueError:
+        n = 3
+    n = max(1, min(len(VIEWS), n))
+    user = judge_input(research, receipts)
+    log, view_list, ans, error = [], [], None, None
+    if n > 1:
+        ans, view_list = _views(research, receipts, user, n, log)
+    if ans is None:
+        ans, err = _ask(prompts.SYSTEM, user, "judge")
+        if err:
+            error = f"judge: {err}"
+            ans = {"overall": "Yellow", "reliability": "low",
+                   "reliability_why": "the judge model call failed, so the color is the default, not a judgement",
+                   "reasoning": "The judge model call failed; no judgement was made on the receipts."}
+    v = build_verdict(research, receipts, ans, error)
+    v["guards"] = log + v["guards"]
+    v["views"] = view_list
+    if not error:
+        apply_agreement(v, view_list, n)
+    v = guards.apply(v, research, receipts)
     v["reasons"] = reasons(v, research, receipts)
     return v

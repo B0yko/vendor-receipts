@@ -51,6 +51,8 @@ What you see in the user message:
 - MATRIX: the 24 categories with status, note, query count and receipt ids.
 - RECEIPTS: id, category, finding, quote, url, domain, date, author type, severity, polarity, promise link,
   independent, dated; reposts listed under their original.
+- DISCONFIRMATION: the findings a checker tried to disprove (targets), the queries it ran, and each outcome:
+  survived, weakened or refuted, with why and receipt ids; or why it was skipped or not run.
 
 {FIELD_MEANINGS}
 
@@ -61,6 +63,10 @@ Code applies these four guards after you: a flag that breaks one is dropped or m
 build every flag and the color so that it survives them. In particular: a red flag whose receipts are all vendor_self
 moves to yellow (a claim is never proof) unless a contradicted claim check cites one of them, and a Green with any red
 flag left becomes Yellow.
+
+Disconfirmation: a Red needs a critical finding that survived disconfirmation. A finding whose target was refuted
+never carries a Red (code moves a red flag resting only on refuted receipts to yellow); a weakened one lowers
+reliability (never high); a Red on a finding that was not tested says so in reliability_why.
 
 {ledger.REVIEW_RULES}
 
@@ -86,3 +92,38 @@ Acme presents itself as ...; external sources show ...; a buyer should ...". Eve
 
 Answer with one JSON object and nothing else, in this shape:
 {ANSWER_SHAPE}"""
+
+
+VIEW_ALL = ""
+
+VIEW_EXTERNAL = """
+
+VIEW: the outside record only. In this call RECEIPTS holds only receipts from outside the vendor (independent and
+author type other than vendor_self) plus the vendor's statements against its own interest. Judge the color on what
+outside sources show. SITE is the vendor's story to test, never proof: a vendor claim with no outside receipt is a
+blind spot, not a strength."""
+
+VIEW_DEVIL = """
+
+VIEW: devil's advocate. First name the color a straightforward reading of the receipts suggests ("argued_against").
+Then build the strongest honest case for a different color from the same receipts ("argued_for"): against a Green or
+Yellow, find the caveat or blocker that reading underweights; against a Red, find what disconfirms it (a refuted or
+weakened target, a weak author type, one source, a vendor claim taken as proof). Every argument cites receipt ids, the
+color rule and the guards still apply, and nothing comes from outside the receipts. Set "overall" to the color your
+case honestly carries under the color rule; if the case does not hold, keep the first color and say why in reasoning.
+Add "argued_against" and "argued_for" (colors) to the JSON object."""
+
+RECONCILE = """
+
+RECONCILE: after the research you see VIEWS, the answers of independent judge views on the same research: "all"
+(every kept receipt), "external" (outside receipts and vendor statements against interest only) and "devil" (a
+devil's advocate that argued for a different color); a view that failed is missing. Write the one final answer in
+the same JSON shape. Weigh the views by their receipts, not by vote: a point counts only if its cited receipts carry it
+under the color rule and the guards. Take the strongest flags from any view (cite their receipt ids, merge duplicates),
+keep the devil's caveats that hold as yellow flags, and drop arguments that rest on vendor claims or user reviews
+alone. Reliability: when the view colors agree, write "N/N views agree" in reliability_why, and the agreement supports
+a higher reliability; when they disagree, lower the reliability and name in reliability_why which views disagree and
+why. would_flip names the evidence that separates the views."""
+
+VIEW_SYSTEM = {"all": SYSTEM + VIEW_ALL, "external": SYSTEM + VIEW_EXTERNAL, "devil": SYSTEM + VIEW_DEVIL}
+RECONCILE_SYSTEM = SYSTEM + RECONCILE

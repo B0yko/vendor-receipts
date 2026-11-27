@@ -4,6 +4,9 @@ apply(verdict, research, receipts) -> verdict, with one line per change in verdi
   G4 a flag with no kept receipt is dropped (a failed source is no signal);
   G2 a flag whose kept receipts are all user_review is dropped, its text goes to blind_spots as "users report ...";
   G3 a red flag of category 14 (site quality) moves to yellow;
+  D  (color rule: a Red survived disconfirmation) a red flag whose kept receipts are all targets refuted in
+     research["disconfirmation"] moves to yellow; a surviving red flag on a weakened target caps reliability at
+     medium. Targets name receipt ids ("e3", {"id": "e3"} or text that cites [e3]); a target without ids is a no-op;
   G1 a red flag whose kept receipts are all vendor_self (a claim, never proof) moves to yellow, unless one of them
      backs a contradicted claim check (a receipted contradiction on the vendor's own site);
      Red needs a red flag with an external receipt (independent and not vendor_self) or a vendor statement against
@@ -13,6 +16,8 @@ apply(verdict, research, receipts) -> verdict, with one line per change in verdi
      (categories 4-7), else stays Yellow, logged "too little evidence".
 `call` always equals the final `overall`.
 """
+import json, re
+
 from app import ledger
 
 BUCKETS = ("red_flags", "yellow_flags", "green_flags")
@@ -38,6 +43,18 @@ def _users_report(text, kept):
     dates = sorted(d for d in (r.get("date", "") for r in kept) if d)
     period = f", {dates[0]}" + (f" to {dates[-1]}" if dates[-1] != dates[0] else "") if dates else ""
     return f"users report {t} ({len(kept)} source{'s' if len(kept) != 1 else ''}{period}; not confirmed elsewhere)"
+
+
+def _target_ids(t):
+    return set(re.findall(r"\be\d+\b", t if isinstance(t, str) else json.dumps(t)))
+
+
+def disconfirmed(research, outcome):
+    """Receipt ids named by the disconfirmation targets with this outcome (survived, weakened, refuted)."""
+    d = research.get("disconfirmation")
+    outs = d.get("outcomes") if isinstance(d, dict) else None
+    return set().union(*[_target_ids(o.get("target")) for o in outs or []
+                         if isinstance(o, dict) and o.get("outcome") == outcome])
 
 
 def apply(verdict, research, receipts):
@@ -72,6 +89,18 @@ def apply(verdict, research, receipts):
         log.append(f"G3 moved red flag '{_short(f.get('text'))}' to yellow: site quality never makes a Red")
     verdict["red_flags"] = [f for f in verdict["red_flags"] if f.get("category") != SITE_QUALITY]
     verdict["yellow_flags"] = moved + verdict["yellow_flags"]
+
+    refuted, weakened = disconfirmed(research, "refuted"), disconfirmed(research, "weakened")
+    gone = [f for f in verdict["red_flags"] if refuted and {r["id"] for r in kept(f)} <= refuted]
+    for f in gone:
+        log.append(f"D moved red flag '{_short(f.get('text'))}' to yellow: its finding was refuted by disconfirmation")
+    verdict["red_flags"] = [f for f in verdict["red_flags"] if not any(f is g for g in gone)]
+    verdict["yellow_flags"] = gone + verdict["yellow_flags"]
+    shaky = [f for f in verdict["red_flags"] if weakened & {r["id"] for r in kept(f)}]
+    if shaky and verdict.get("reliability") == "high":
+        verdict["reliability"] = "medium"
+        log.append(f"D reliability high -> medium: red flag '{_short(shaky[0].get('text'))}' was weakened by "
+                   f"disconfirmation")
 
     contradicted = {i for c in research.get("claim_checks", []) if c.get("status") == "contradicted"
                     for i in c.get("evidence", []) if by_id.get(i, {}).get("kept")}
