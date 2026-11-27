@@ -32,6 +32,8 @@ worktree() {
 
 batch() {  # $1 cases, $2 out, $3 extra make args
   cd "$W"
+  # the blind batch has its own Tavily key (llm.env KC: tavily-api-key-2) and so its own 100 RPM and limiter state
+  TAVILY_RPM="${TAVILY_RPM:-98}" TAVILY_RL_DIR="${TAVILY_RL_DIR:-/tmp/vendor-receipts-tavily-rl-blind}" \
   make batch CASES="$1" OUT="$2" SUBMIT="$SUBMIT" RUN_ID="${RUN_ID:-blind}" CONC="${CONC:-10}" \
     MODEL_CONC="${MODEL_GLOBAL_CONC:-40}" MODEL_GLOBAL_CONC="${MODEL_GLOBAL_CONC:-40}" WALL_CAP="${WALL_CAP:-1380}" \
     JUDGE_RESERVE="${JUDGE_RESERVE:-600}" SINGLE_VIEW_BELOW="${SINGLE_VIEW_BELOW:-420}" ${3:-}
