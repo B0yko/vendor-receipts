@@ -39,10 +39,22 @@ def _table(head, rows):
 
 
 def _checks(rc):
+    """'resolves yes same_company yes says_it yes (partial: <missing detail>) dated no': L6's says_it_note sits next
+    to the says_it check."""
     c = rc.get("checks") or {}
     if not c:
         return "not checked"
-    return " ".join(f"{k} {'yes' if c.get(k) else 'no'}" for k in CHECKS if k in c)
+    note = _inline(rc.get("says_it_note"))
+    return " ".join(f"{k} {'yes' if c.get(k) else 'no'}" + (f" ({note})" if k == "says_it" and note else "")
+                    for k in CHECKS if k in c)
+
+
+def _model_calls(stats, v):
+    """stats.llm_calls counts the research loop and disconfirmation only (each adds to research stats), so it is
+    labelled that way; a pipeline-wide count (verdict stats model_calls) is shown when a later step records one."""
+    out = f"research model calls: {stats.get('llm_calls', 0)}"
+    total = ((v or {}).get("stats") or {}).get("model_calls")
+    return out + (f" · all model calls: {total}" if total not in (None, "") else "")
 
 
 def _quote_block(q):
@@ -234,7 +246,7 @@ def render(research, receipts, verdict):
          f"- Reliability: {v.get('reliability', '?')} ({_cell(v.get('reliability_why'))})",
          f"- Model: {v.get('model', '?')} · mode: {v.get('mode', '?')} · run id: {v.get('run_id', '?')}",
          f"- Seconds: {v.get('seconds', r.get('seconds', '?'))} (research {r.get('seconds', '?')}) · capped: "
-         f"{_yn(stats.get('capped'))} · tool calls: {stats.get('tool_calls', 0)} · model calls: {stats.get('llm_calls', 0)}"]
+         f"{_yn(stats.get('capped'))} · tool calls: {stats.get('tool_calls', 0)} · {_model_calls(stats, v)}"]
     L += _steps(v)
     L.append(f"- Disconfirmation: {disconfirmation_summary(r)} · judge views: {views_summary(v)} · audit: "
              f"{audit_summary(v)}")
@@ -335,7 +347,7 @@ def render(research, receipts, verdict):
     openrows = [k for k in map(str, CATEGORIES) if (m.get(k) or {}).get("status", "open") == "open"]
     L += ["", "### Limits",
           f"- Capped at the wall cap or a call cap: {_yn(stats.get('capped'))}",
-          f"- Rounds {len(r.get('rounds') or [])}, tool calls {stats.get('tool_calls', 0)}, model calls "
+          f"- Rounds {len(r.get('rounds') or [])}, tool calls {stats.get('tool_calls', 0)}, research model calls "
           f"{stats.get('llm_calls', 0)}, sources read {len(r.get('sources') or {})}, failed {len(failed)}",
           f"- Categories still open: {', '.join(openrows) if openrows else 'none'}",
           f"- Receipts kept {sum(1 for x in receipts if x.get('kept'))} of {len(receipts)}"]
