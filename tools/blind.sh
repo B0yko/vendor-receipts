@@ -10,6 +10,7 @@
 #   tools/blind.sh flip         full-history publish check, then the visibility flip only on PASS.
 # The run splits the products by row parity into two processes: half a on Tavily key KEY_A (tavily-api-key), half b
 # on KEY_B (tavily-api-key-2), each with its own limiter bucket at TAVILY_RPM (95); then ONE submission is rebuilt.
+# A_COUNT=N puts only the first N products on key A (when key 1 runs low on credits).
 # Env: TAG (blind-run), SUBMIT (the main checkout), WALL_CAP (1380), CONC (10), MODEL_GLOBAL_CONC (40), ALLOW_LABELLED
 # (default 1, Andrii 17:54: labelled-set names and domains allowed only in stackgini-verdicts.csv and traces/ as our own
 # research citations; labelled row texts stay blocked everywhere; ALLOW_LABELLED=0 redacts instead).
@@ -57,10 +58,12 @@ if csv_like:  # quoted multi-line fields: split by parsed records, not by lines
     rows = out
 rows = [r for r in rows if r.strip()]
 ext = ".csv" if csv_like else ".jsonl"
-for name, part in (("a", rows[0::2]), ("b", rows[1::2])):
+n_a = os.environ.get("A_COUNT")   # e.g. A_COUNT=3: only 3 products on key 1 (its credits), the rest on key 2
+part_a, part_b = (rows[:int(n_a)], rows[int(n_a):]) if n_a else (rows[0::2], rows[1::2])
+for name, part in (("a", part_a), ("b", part_b)):
     with open(f"runs/blind_half_{name}{ext}", "w") as f:
         f.writelines(head + part)
-print(f"halves: {len(rows[0::2])} + {len(rows[1::2])} of {len(rows)}")
+print(f"halves: {len(part_a)} (key A) + {len(part_b)} (key B) of {len(rows)}")
 PY
 }
 
