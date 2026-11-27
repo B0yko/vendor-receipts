@@ -1,10 +1,11 @@
-"""Research brain (lane L2): research(url, deadline=None) -> Research (app/ledger.py shape, every key present).
+"""Research brain (lane L2): research(url, deadline=None, hints=None) -> Research (app/ledger.py shape, every key present).
 
 identity -> site read -> plan over the 24 categories -> research loop -> claim check:
 1. Site read: tools.fetch(url) (a deep URL stays the product), up to 14 same-site pages picked by keyword plus
    /.well-known/security.txt; pages with < 400 chars of text go to one tools.extract batch. Every text lands in
    research["sources"]; site.pages lists every page.
-2. Intake (one model call, purpose "intake"): identity, promise, claims, evidence from the vendor's own pages,
+2. Intake (one model call, purpose "intake"; the buyer's product and vendor names from `hints` are anchors to
+   verify, stored in identity.notes): identity, promise, claims, evidence from the vendor's own pages,
    hypotheses and round-1 actions for all 24 categories (ordered round-robin by category, so a cap trims depth first).
 3. Rounds (<= 4): the actions run on 8 threads, results kept in action order; every retrieved text lands in sources,
    failures in sources_failed, queries in matrix[cat].queries. One model call (purpose "round") turns this round's
@@ -135,9 +136,19 @@ def _tool_text(tool, res):
     return json.dumps(d, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _hints(h):
+    """Batch-input identity hints {"id", "product", "vendor"} -> clean strings (anchors to verify, never facts)."""
+    h = h if isinstance(h, dict) else {}
+    return {k: _str(h.get(k))[:200] for k in ("id", "product", "vendor") if _str(h.get(k))}
+
+
 class _Run:
-    def __init__(self, url, deadline):
+    def __init__(self, url, deadline, hints=None):
         self.r = ledger.new_research(url)
+        self.hints = _hints(hints)
+        if self.hints.get("product") or self.hints.get("vendor"):
+            self.r["identity"]["notes"] = "Buyer's identity hints (to verify): " + "; ".join(
+                f'{k} "{v}"' for k, v in self.hints.items())
         self.r["started"] = _now_iso()
         self.deadline = deadline
         self.t0 = time.time()
@@ -264,10 +275,13 @@ class _Run:
 
     # ---- 2. intake
     def intake(self, pages):
-        ans = self.ask(prompts.intake_system(self.table), prompts.intake_user(self.r["url"], pages), "intake")
+        ans = self.ask(prompts.intake_system(self.table),
+                       prompts.intake_user(self.r["url"], pages, hints=self.hints), "intake")
         if ans is None:
+            self.hint_fallback()
             return []
         self.merge_identity(ans.get("identity"), overwrite=True)
+        self.hint_fallback()
         site = ans.get("site") if isinstance(ans.get("site"), dict) else {}
         self.r["site"]["core_promise"] = _str(site.get("core_promise"))
         self.r["site"]["segment"] = _str(site.get("segment"))
@@ -308,6 +322,12 @@ class _Run:
                     out.append(by[c][depth])
             depth += 1
         return out
+
+    def hint_fallback(self):
+        """Intake gave no identity: the buyer's names stand in (still marked unverified in identity.notes)."""
+        for k in ("product", "vendor"):
+            if not self.r["identity"][k] and self.hints.get(k):
+                self.r["identity"][k] = self.hints[k]
 
     def merge_identity(self, d, overwrite):
         if not isinstance(d, dict):
@@ -356,14 +376,15 @@ class _Run:
         for i, (a, res) in enumerate(zip(actions, results), 1):
             tool, args, row = a["tool"], a["args"], self.r["matrix"][str(a["category"])]
             self.seen.add(json.dumps([tool, args], sort_keys=True, ensure_ascii=False, default=str))
-            self.add_unique(row["queries"], _str(args.get("query")) if tool == "search" and args.get("query") else
-                            f"{tool} {json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}")
+            q = _str(args.get("query"))
+            self.add_unique(row["queries"], (q if tool == "search" else f"news: {q}") if tool in ("search", "news") and q
+                            else f"{tool} {json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}")
             err, got = res.get("error"), []
-            if tool == "search":
+            if tool in ("search", "news"):
                 got = [(x.get("url"), x.get("title"), x.get("published_date"), x.get("content"), "search")
                        for x in res.get("results") or [] if isinstance(x, dict)]
             elif tool == "extract":
-                got = [(x.get("url"), "", "", x.get("text"), "extract") for x in res.get("results") or []
+                got = [(x.get("url"), "", x.get("published_date"), x.get("text"), "extract") for x in res.get("results") or []
                        if isinstance(x, dict)]
                 for f in res.get("failed") or []:
                     if isinstance(f, dict):
@@ -544,7 +565,9 @@ class _Run:
         return self.finish()
 
 
-def research(url, deadline=None):
+def research(url, deadline=None, hints=None):
     """-> Research for the product at `url` (app/ledger.py shape). `deadline`: epoch seconds; no new round starts
-    when fewer than JUDGE_RESERVE seconds remain (the judge needs them), and stats.capped is set."""
-    return _Run(url, deadline).run()
+    when fewer than JUDGE_RESERVE seconds remain (the judge needs them), and stats.capped is set. `hints`: the batch
+    input's {"id", "product", "vendor"}: identity anchors for the intake prompt and identity.notes, never facts (the
+    site read may correct them; a mismatch is a same-name risk)."""
+    return _Run(url, deadline, hints).run()

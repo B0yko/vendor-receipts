@@ -106,6 +106,8 @@ def _common(table):
 def intake_system(table):
     task = f"""This call is the intake. You get the vendor's own pages (numbered, fetched from the site at the URL).
 The product is the one at the given URL, even when the URL is a deep page of a larger vendor site.
+The buyer may name the product and vendor (identity hints): use them as anchors to verify, never as facts. The
+pages decide the identity; a mismatch between the buyer's names and the pages is a same-name risk.
 Do five things:
 1. identity: the product, the vendor, its legal entity (from the imprint or legal pages), the parent if any, former
    names, the vendor's domains, key people with roles, the country, the site's languages, same-name risks (other
@@ -139,9 +141,23 @@ def _cap(text, n):
     return text if len(text) <= n else text[:n] + " [...cut]"
 
 
-def intake_user(url, pages):
-    """pages: [{"url", "title", "text"}] in fetch order; the first is the page at the URL."""
-    head = [f"Product URL: {url}", f"Vendor pages fetched: {len(pages)}", ""]
+def hints_line(hints):
+    """The buyer's names for the product as anchors to verify ('' without hints)."""
+    hints = hints or {}
+    p, v = hints.get("product"), hints.get("vendor")
+    if not (p or v):
+        return ""
+    name = f'this product "{p}"' if p else "this product"
+    return (f"Identity hints (anchors to verify, not facts): the buyer names {name}"
+            + (f' by vendor "{v}"' if v else "") + ". The site read may correct them; a mismatch with the pages is a "
+            "same-name risk: note it in same_name_risks and identity.notes, and search under both names.")
+
+
+def intake_user(url, pages, hints=None):
+    """pages: [{"url", "title", "text"}] in fetch order; the first is the page at the URL. hints: {"product",
+    "vendor"} as the buyer names them (optional)."""
+    hl = hints_line(hints)
+    head = [f"Product URL: {url}"] + ([hl] if hl else []) + [f"Vendor pages fetched: {len(pages)}", ""]
     parts, size = [], sum(len(h) for h in head)
     for i, p in enumerate(pages, 1):
         block = (f"[P{i}] url: {p['url']}\ntitle: {p.get('title') or ''}\n"

@@ -53,6 +53,8 @@ def fake_tools(calls=None):
         calls.append((name, tuple(sorted(args.items()))))
         if name == "search":
             return {**search(**args), "tool": name, "args": args, "seconds": time.time()}
+        if name == "news":
+            return {**search(args["query"]), "tool": name, "args": args, "seconds": time.time()}
         if name == "dns":
             return {"host": args["host"], "a": ["192.0.2.1"], "aaaa": [], "cname": [], "ns": [], "error": None,
                     "seconds": time.time()}
@@ -64,7 +66,7 @@ def fake_tools(calls=None):
             return {"error": "timeout"}
         return {"error": f"unknown tool {name}"}
 
-    table = {n: {"fn": None, "doc": f"{n}: invented doc", "args": ["x"]} for n in ("search", "dns", "wayback", "fail")}
+    table = {n: {"fn": None, "doc": f"{n}: invented doc", "args": ["x"]} for n in ("search", "news", "dns", "wayback", "fail")}
     return types.SimpleNamespace(fetch=fetch, extract=extract, run_tool=run_tool, TOOLS=table)
 
 
@@ -141,13 +143,13 @@ class Base(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def run_agent(self, intake=None, deadline=None, calls=None):
+    def run_agent(self, intake=None, deadline=None, calls=None, hints=None):
         seen, intake_seen = [], []
         ans = intake or intake_answer()
         model.set_fake("intake", lambda s, u: (intake_seen.append(u), ans)[1])
         model.set_fake("round", make_round(seen))
         with mock.patch.object(agent, "tools", fake_tools(calls)):
-            r = agent.research(HOME, deadline=deadline)
+            r = agent.research(HOME, deadline=deadline, hints=hints)
         return r, seen, intake_seen
 
 
@@ -270,6 +272,49 @@ class TestLoop(Base):
             r = agent.research(HOME)
         self.assertEqual(ledger.validate_research(r), [])
         self.assertTrue(any(f["what"] == "agent" for f in r["sources_failed"]))
+
+
+class TestHints(Base):
+    HINTS = {"id": "p7", "product": "Acme Cloud", "vendor": "Acme"}
+
+    def test_hints_reach_intake_prompt_and_notes(self):
+        r, seen, intake_seen = self.run_agent(hints=self.HINTS)
+        self.assertIn('the buyer names this product "Acme Cloud" by vendor "Acme"', intake_seen[0])
+        self.assertIn("anchors to verify, not facts", intake_seen[0])
+        notes = r["identity"]["notes"]
+        for v in ("p7", "Acme Cloud", "Acme"):
+            self.assertIn(v, notes)
+        self.assertIn("Buyer's identity hints", seen[0])                     # rounds see them through identity
+        self.assertEqual(ledger.validate_research(r), [])
+
+    def test_no_hints_no_line(self):
+        _, _, intake_seen = self.run_agent()
+        self.assertNotIn("Identity hints", intake_seen[0])
+        _, _, intake_seen = self.run_agent(hints={"id": "p7"})                # an id alone names nothing
+        self.assertNotIn("Identity hints", intake_seen[0])
+        self.assertIn("vendor", prompts.hints_line({"vendor": "Acme"}))
+        self.assertEqual(prompts.hints_line(None), "")
+
+    def test_site_corrects_hints(self):
+        r, _, _ = self.run_agent(hints={"product": "Acme Stock", "vendor": "Acme Old"})
+        self.assertEqual(r["identity"]["product"], "Acme Cloud")              # the pages decide
+        self.assertIn("Acme Stock", r["identity"]["notes"])
+
+    def test_hints_stand_in_when_intake_fails(self):
+        def boom(s, u):
+            raise model.ModelError("endpoint down")
+        model.set_fake("intake", boom)
+        with mock.patch.object(agent, "tools", fake_tools()):
+            r = agent.research(HOME, hints=self.HINTS)
+        self.assertEqual((r["identity"]["product"], r["identity"]["vendor"]), ("Acme Cloud", "Acme"))
+        self.assertIn("to verify", r["identity"]["notes"])
+
+    def test_news_tool_is_a_search(self):
+        ans = intake_answer()
+        ans["actions"].append({"tool": "news", "args": {"query": "Acme layoffs"}, "category": 21, "hypothesis": "x"})
+        r, _, _ = self.run_agent(intake=ans)
+        self.assertIn("news: Acme layoffs", r["matrix"]["21"]["queries"])
+        self.assertEqual(r["sources"]["https://news.example.org/acme-layoffs"]["kind"], "search")
 
 
 class TestPieces(unittest.TestCase):
