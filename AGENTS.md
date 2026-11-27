@@ -19,7 +19,9 @@ What it does: see SPEC.md (goal, done checks D1..Dn, out of scope). Plan state: 
   before the event. The `openai` SDK with the same LLM_* env is fine too; keep every call cached.
 - `tests/`: unit tests; `tests/smoke_cases.jsonl` and `tests/smoke_labels.csv` hold public, non-event examples only.
 - `data/` (inputs: labelled examples, blind cases) and `runs/` (verdicts, manifests, eval outputs): not tracked;
-  event data stays in the event. `hooks/pre-push` runs `tools/prepush.py` and blocks a push that names an event domain.
+  event data stays in the event. `hooks/pre-push` runs `tools/prepush.py` on every pushed commit: labelled-set rows, domains and names are blocked
+  everywhere; blind-product domains only in `stackgini-verdicts.csv` and `traces/`. `tools/publish_check.py` runs the same
+  rules over the whole history before the repo goes public (`--flip` only on PASS).
 - `.cache/`: cached external calls. Not tracked.
 - Lanes: each lane edits only its own paths (SPEC.md § Lanes); shared files change only through Lead or Andrii.
 
