@@ -4,6 +4,7 @@
 #                               parallel; writes runs/verdicts.jsonl and, into the main checkout, stackgini-verdicts.csv
 #                               and traces/<id>.md. Default CSV data/blind.csv (columns id,url,product,vendor).
 #   tools/blind.sh rerun IDS    re-run failed ids (comma list) into runs/rerun.jsonl and merge them into the submission.
+#   tools/blind.sh rebuild [CSV] write the submission from runs/verdicts.jsonl without running (after a stop or crash).
 #   tools/blind.sh ship         redact labelled-set sources unless ALLOW_LABELLED=1, commit stackgini-verdicts.csv and
 #                               traces/, push main through the pre-push guard (never --no-verify).
 #   tools/blind.sh flip         full-history publish check, then the visibility flip only on PASS.
@@ -51,6 +52,15 @@ case ${1:-} in
     CSV=${CSV:-data/blind.csv}
     worktree
     RUN_ID=${RUN_ID:-blind-rerun} batch "$CSV" runs/rerun.jsonl "ONLY=$2"
+    # the rerun's export holds only the rerun ids: rebuild the full submission (the last non-error line per id wins)
+    cat runs/verdicts.jsonl runs/rerun.jsonl > runs/verdicts_all.jsonl
+    python3 -m app.run --cases "$CSV" --from-jsonl runs/verdicts_all.jsonl --submit "$SUBMIT"
+    echo "blind: submission rebuilt from runs/verdicts_all.jsonl"
+    ;;
+  rebuild)
+    CSV=${2:-data/blind.csv}
+    worktree; cd "$W"
+    python3 -m app.run --cases "$CSV" --from-jsonl "${OUT:-runs/verdicts.jsonl}" --submit "$SUBMIT"
     ;;
   ship)
     cd "$M"
