@@ -9,7 +9,7 @@ from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-import prepush, publish_check  # noqa: E402
+import prepush, publish_check, redact_labelled  # noqa: E402
 G = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
      "-c", "tag.gpgsign=false"]
 COLS = ["id", "url", "product", "vendor", "overall", "green_flags", "yellow_flags", "red_flags", "reasoning",
@@ -51,7 +51,7 @@ class GuardRepo(unittest.TestCase):
         self = cls.__new__(cls)
         r = self.repo = os.path.join(cls.base, "repo")
         os.makedirs(os.path.join(r, "tools"))
-        for f in ("prepush.py", "publish_check.py", "eval.py"):
+        for f in ("prepush.py", "publish_check.py", "redact_labelled.py", "eval.py"):
             shutil.copy(os.path.join(ROOT, "tools", f), os.path.join(r, "tools", f))
         shutil.copytree(os.path.join(ROOT, "hooks"), os.path.join(r, "hooks"))
         self.put("data/hackathon_40_solutions_commented.csv", table(COLS, LABELS))
@@ -114,9 +114,10 @@ class TestRules(GuardRepo):
         rc, out = self.publish()
         self.assertEqual(rc, 0, out)
         self.assertIn("RESULT PASS", out)
-        for kind in ("private path", "labelled domain", "labelled name", "labelled text", "blind domain", "token",
-                     "attribution"):
+        for kind in ("private path", "labelled domain", "labelled name", "labelled text", "labelled-source",
+                     "blind domain", "token", "attribution"):
             self.assertIn(f"PASS {kind}: 0 findings", out)
+        self.assertIn("mode: strict", out)
         self.assertIn("5 labelled rows", out)
 
     def test_labelled_domain_name_and_text_fail_masked(self):
@@ -126,11 +127,11 @@ class TestRules(GuardRepo):
         self.commit("add agent")
         rc, err = self.prepush()
         self.assertEqual(rc, 1)
-        self.assertIn("app/agent.py:ac", err)
+        self.assertIn("app/agent.py:1:ac", err)
         self.assertIn("(labelled domain)", err)
-        self.assertIn("app/prompts.py:ac", err)
+        self.assertIn("app/prompts.py:1:ac", err)
         self.assertIn("(labelled name)", err)
-        self.assertIn("notes.md:pr", err)
+        self.assertIn("notes.md:1:pr", err)
         self.assertIn("(labelled text)", err)
         self.assertIn("push blocked", err)
         self.no_terms(err)
@@ -150,8 +151,8 @@ class TestRules(GuardRepo):
         self.commit("vendor without its legal suffix, short product on its domain")
         rc, err = self.prepush()
         self.assertEqual(rc, 1)
-        self.assertIn("b.md:ve", err)
-        self.assertIn("b.md:ti", err)
+        self.assertIn("b.md:1:ve", err)
+        self.assertIn("b.md:1:ti", err)
         self.put("c.md", "zentrovia is a word here\n")
         self.put("tests/leak_allow.txt", "zentrovia # generic in this test\n")
         self.commit("allowed word")
@@ -170,31 +171,32 @@ class TestRules(GuardRepo):
         rc, out = self.publish()
         self.assertEqual(rc, 1)
         self.assertIn("FAIL blind domain: 1 findings", out)
-        self.assertIn("app/x.py:gl", out)
+        self.assertIn("app/x.py:1:gl", out)
         self.no_terms(out)
         self.git("rm", "-q", "app/x.py")
         self.commit("drop it: was GlimmerForge.test")
         rc, out = self.publish()
         self.assertIn("FAIL blind domain: 2 findings", out)
-        self.assertIn(":(message):gl", out)
+        self.assertIn(":(message):1:gl", out)
 
     def test_labelled_rules_inside_zone(self):
-        self.put("traces/b1.md", "Similar to acmewidgets.test.\n")
+        self.put("traces/b1.md", "# b1\nSimilar to acmewidgets.test.\n")
         self.commit("bad trace")
         rc, out = self.publish()
         self.assertEqual(rc, 1)
-        self.assertIn("traces/b1.md:ac", out)
+        self.assertIn("traces/b1.md:2:ac", out)
+        self.assertIn("(labelled-source)", out)
         self.git("rm", "-q", "traces/b1.md")
         self.commit("fix trace")
-        # b2 is also a labelled product (same registrable domain): its domain, names and text are fine in ZONE.
-        self.put("traces/b2.md", "app.blinkoria.test, Blinkoria Desk by Blinkoria Labs Inc. " + ROW2_TEXT + "\n")
+        # b2 is also a labelled product (same registrable domain): its domain and names are fine in ZONE.
+        self.put("traces/b2.md", "app.blinkoria.test, Blinkoria Desk by Blinkoria Labs Inc.\n")
         self.put("stackgini-verdicts.csv", "id,url\nb2,https://blinkoria.test/desk\n")
-        # b3 shares a labelled vendor: the vendor name is fine in ZONE, the other labelled product is not. Row text
-        # is checked outside ZONE only (a trace can match it only by coincidence).
-        self.put("traces/b3.md", "Acmewidget GmbH makes Acmewidget Mail. " + ROW1_TEXT + "\n")
+        # b3 shares a labelled vendor: the vendor name is fine in ZONE, the other labelled product is not.
+        self.put("traces/b3.md", "Acmewidget GmbH makes Acmewidget Mail.\n")
         self.commit("traces")
         rc, out = self.publish()
-        self.assertIn("FAIL labelled domain: 1 findings", out)
+        self.assertIn("FAIL labelled-source: 1 findings", out)  # the b1 trace, still in history
+        self.assertIn("PASS labelled domain: 0 findings", out)
         self.assertNotIn("traces/b2.md", out)
         self.assertNotIn("traces/b3.md", out)
         self.assertNotIn("stackgini-verdicts.csv", out)
@@ -202,8 +204,75 @@ class TestRules(GuardRepo):
         self.put("README.md", "see blinkoria.test\n")
         self.commit("more")
         rc, out = self.publish()
-        self.assertIn("traces/b3.md:ac", out)
-        self.assertIn("README.md:bl", out)
+        self.assertIn("traces/b3.md:1:ac", out)
+        self.assertIn("README.md:1:bl", out)
+        self.no_terms(out)
+
+    def test_row_text_fails_in_zone_too(self):
+        # Labelled row text is FAIL everywhere, also for a product that is both blind and labelled (b2).
+        self.put("traces/b2.md", "Blinkoria Desk.\n\n" + ROW2_TEXT + "\n")
+        self.commit("trace with label text")
+        for args in ((), ("--allow-labelled-sources",)):
+            rc, out = self.publish(*args)
+            self.assertEqual(rc, 1, args)
+            self.assertIn("FAIL labelled text: 1 findings", out)
+            self.assertIn("traces/b2.md:3:su", out)
+            self.no_terms(out)
+
+    def test_labelled_source_classification(self):
+        self.put("traces/b1.md", "# Glimmer Forge\n\n- quote from https://www.zentrovia.test/blog/x: \"fast\"\n"
+                                 "- Velmora Analytics owns it, says ZENTROVIA\n")
+        self.put("stackgini-verdicts.csv", "id,url,overall,why\nb1,https://glimmerforge.test,Red,see quorbex.test\n")
+        self.commit("blind traces citing labelled sources")
+        rc, out = self.publish()
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL labelled-source: 5 findings", out)  # a name inside a URL counts too
+        for where in ("traces/b1.md:3:ze", "traces/b1.md:4:ve", "traces/b1.md:4:ze", "stackgini-verdicts.csv:2:qu"):
+            self.assertIn(where, out)
+        self.assertIn("FAIL labelled-source terms in 2 files: ", out)
+        self.assertIn("ze*****ia x2", out)
+        for kind in ("labelled domain", "labelled name", "labelled text"):
+            self.assertIn(f"PASS {kind}: 0 findings", out)
+        self.no_terms(out)
+        rc, err = self.prepush()
+        self.assertEqual(rc, 1)
+        self.assertIn("tools/redact_labelled.py", err)
+
+    def test_switch_allows_labelled_sources_in_zone_only(self):
+        self.put("traces/b1.md", "Velmora Analytics, see https://zentrovia.test/pricing\n")
+        self.commit("trace")
+        rc, out = self.publish("--allow-labelled-sources")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("mode: labelled sources allowed", out)
+        self.assertIn("PASS labelled-source: 0 findings, 3 allowed (INFO)", out)
+        self.assertIn("INFO labelled-source terms in 1 files: ", out)
+        self.assertIn("traces/b1.md:1:ve", out)
+        self.assertIn("(labelled-source), allowed", out)
+        self.assertIn("RESULT PASS: 0 findings in 0 of 8 rules; 3 labelled-source allowed", out)
+        rc, err = self.prepush()
+        self.assertEqual(rc, 1)
+        rc, err = self.run_main(prepush.main, (), dict(self.env, PREPUSH_ALLOW_LABELLED_SOURCES="1"))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("0 findings, 3 labelled-source allowed", err)
+        self.assertIn("prepush: INFO ", err)
+        # Outside the two places nothing changes, and the env does not switch publish_check (a flag only).
+        self.put("docs/notes.md", "zentrovia.test\n")
+        self.commit("notes")
+        rc, out = self.publish("--allow-labelled-sources")
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL labelled domain: 1 findings", out)
+        rc, _ = self.run_main(prepush.main, (), dict(self.env, PREPUSH_ALLOW_LABELLED_SOURCES="1"))
+        self.assertEqual(rc, 1)
+        rc, out = self.publish(env=dict(self.env, PREPUSH_ALLOW_LABELLED_SOURCES="1"))
+        self.assertIn("mode: strict", out)
+        self.assertIn("FAIL labelled-source: 3 findings", out)
+
+    def test_switch_keeps_zone_paths_strict(self):
+        self.put("traces/zentrovia.md", "ok\n")
+        self.commit("named trace")
+        rc, out = self.publish("--allow-labelled-sources")
+        self.assertEqual(rc, 1)
+        self.assertIn("(labelled-source in path)", out)
         self.no_terms(out)
 
     def test_history_and_other_refs(self):
@@ -226,7 +295,7 @@ class TestRules(GuardRepo):
         self.assertEqual(rc, 0, err)
         rc, out = self.publish()
         self.assertEqual(rc, 1)
-        self.assertIn("side.md:ze", out)
+        self.assertIn("side.md:1:ze", out)
 
     def test_tokens(self):
         a = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
@@ -249,7 +318,7 @@ class TestRules(GuardRepo):
         self.commit("feat\n\n" + phrase)
         rc, err = self.prepush()
         self.assertEqual(rc, 1)
-        self.assertIn(":(message):co", err)
+        self.assertIn(":(message):3:co", err)
         self.assertIn("(attribution)", err)
         self.git("reset", "-q", "--hard", "HEAD~1")  # unreachable now: no ref, so out of --all
         self.put("NOTES.md", "Made with care. " + "Generated" + " with a coding agent\n")
@@ -260,8 +329,8 @@ class TestRules(GuardRepo):
         rc, out = self.publish()
         self.assertEqual(rc, 1)
         self.assertIn("FAIL attribution: 2 findings", out)
-        self.assertIn("NOTES.md:ge", out)
-        self.assertIn("(tag v1):an", out)
+        self.assertIn("NOTES.md:1:ge", out)
+        self.assertIn("(tag v1):1:an", out)
         self.assertNotIn("tools/prepush.py", out)
 
     def test_private_paths_and_path_names(self):
@@ -337,7 +406,7 @@ class TestPushAndFlip(GuardRepo):
         self.assertIn("(1 commits", err)
         rc, err = hook("0" * 40)  # a new remote branch: every commit not on a remote
         self.assertEqual(rc, 1)
-        self.assertIn(bad[:8] + ":app.py:qu", err)
+        self.assertIn(bad[:8] + ":app.py:1:qu", err)
 
     def test_flip_only_on_pass(self):
         self.put("app.py", "x = 'zentrovia.test'\n")
@@ -361,6 +430,89 @@ class TestPushAndFlip(GuardRepo):
         self.assertEqual(rc, 1)
         self.assertIn("FAIL fetch", out)
         self.assertEqual(self.gh_calls(), [])
+
+    def test_hook_env_switch(self):
+        self.put("traces/b1.md", "Velmora Analytics\n")
+        self.commit("trace")
+        p = self.git("push", "-q", "origin", "main")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("(labelled-source)", p.stderr)
+        p = subprocess.run(G + ["push", "-q", "origin", "main"], cwd=self.repo, capture_output=True, text=True,
+                           env=dict(self.env, PREPUSH_ALLOW_LABELLED_SOURCES="1"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("1 labelled-source allowed", p.stderr)
+
+    def test_flip_with_switch(self):
+        self.put("traces/b1.md", "Velmora Analytics\n")
+        self.commit("trace")
+        rc, out = self.publish("--flip", env=self.fenv)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.gh_calls(), [])
+        rc, out = self.publish("--flip", "--allow-labelled-sources", env=self.fenv)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.gh_calls()), 2)
+
+
+class TestRedact(GuardRepo):
+    TRACE = ("# Glimmer Forge (b1)\n\n"
+             "- \"Pricing is public\" ([source](https://docs.zentrovia.test/pricing?x=1)).\n"
+             "- Archived: https://web.archive.org/web/2024/https://quorbex.test/about, and support@zentrovia.test\n"
+             "- Review: https://reviews.example.org/p/velmora-analytics/ says \"Velmora Analytics is slow\"\n"
+             "- Same parent as Acmewidget GmbH; competitor Acme Widgets Pro; see glimmerforge.test/about\n")
+    CSV = "id,url,overall,why\r\nb1,https://glimmerforge.test,Red,cites https://zentrovia.test and Zentrovia\r\n"
+
+    def redact(self, *args):
+        return self.run_main(redact_labelled.main, args, self.env)
+
+    def read(self, rel):
+        with open(os.path.join(self.repo, rel), newline="") as f:
+            return f.read()
+
+    def test_redacts_counts_only_and_is_idempotent(self):
+        self.put("traces/b1.md", self.TRACE)
+        with open(os.path.join(self.repo, "stackgini-verdicts.csv"), "w", newline="") as f:
+            f.write(self.CSV)
+        rc, out = self.redact("--dry-run")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("4 URLs, 1 bare domains, 3 names withheld in 2 files (dry run: nothing written)", out)
+        self.assertEqual(self.read("traces/b1.md"), self.TRACE)
+        self.assertEqual(self.read("stackgini-verdicts.csv"), self.CSV)
+        self.no_terms(out)
+        rc, out = self.redact()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("left in the verdicts and traces: 0 labelled-source, 0 labelled text", out)
+        self.assertIn("ze*****ia x", out)
+        self.no_terms(out)
+        d, n, u = ("[source withheld: labelled-set domain]", "[name withheld]", "[source withheld: labelled-set name]")
+        self.assertEqual(self.read("traces/b1.md"), (
+            "# Glimmer Forge (b1)\n\n"
+            f"- \"Pricing is public\" ([source]({d})).\n"
+            f"- Archived: {d}, and support@{d}\n"
+            f"- Review: {u} says \"{n} is slow\"\n"
+            f"- Same parent as Acmewidget GmbH; competitor {n}; see glimmerforge.test/about\n"))
+        got = self.read("stackgini-verdicts.csv")
+        self.assertTrue(got.endswith("\r\n"))
+        rows = list(csv.reader(io.StringIO(got)))
+        self.assertEqual([len(r) for r in rows], [4, 4])
+        self.assertEqual(rows[1][3], f"cites {d} and {n}")
+        before = (self.read("traces/b1.md"), got)
+        rc, out = self.redact()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 URLs, 0 bare domains, 0 names withheld in 0 files", out)
+        self.assertEqual((self.read("traces/b1.md"), self.read("stackgini-verdicts.csv")), before)
+        self.commit("redacted verdicts")
+        rc, out = self.publish()
+        self.assertEqual(rc, 0, out)
+
+    def test_row_text_is_left_and_reported(self):
+        self.put("traces/b9.md", "Note.\n" + ROW1_TEXT + "\n")
+        self.put("app/keep.md", "zentrovia.test\n")  # outside the two places: never touched
+        rc, out = self.redact()
+        self.assertEqual(rc, 1)
+        self.assertIn("left: traces/b9.md:2 (labelled text, edit by hand)", out)
+        self.assertIn("0 labelled-source, 1 labelled text", out)
+        self.assertEqual(self.read("app/keep.md"), "zentrovia.test\n")
+        self.no_terms(out)
 
 
 if __name__ == "__main__":
