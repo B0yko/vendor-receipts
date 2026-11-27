@@ -2,7 +2,7 @@
 
 Plain JSON-able dicts flow through the pipeline:
   app.research.agent.research(url, deadline) -> Research      (lanes L1 tools, L2 research brain: app/research/)
-  app.check.receipts.check(research)          -> [Receipt]     (lane L3: app/check/)
+  app.check.receipts.check(research)          -> [Receipt]     (lane L6: app/check/)
   app.judge.judge.judge(research, receipts)   -> Verdict       (lane L3: app/judge/, the four guards in code)
   app.out.*                                   -> JSONL + CSV + trace.md (lane L3: app/out/)
 Nothing in app/ reads data/ (labels live there; only evalkit/ reads them). The agent's knowledge is the brief, the
