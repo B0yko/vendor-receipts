@@ -67,7 +67,7 @@ the agent's files. Holdout rows are touched only by `make holdout`, once, at the
   - A Tavily plan or usage-limit error appends one line to `runs/alerts.log` (and stderr).
 - `app/research/agent.py` (L2): `research(url, deadline=None) -> Research` (the `app/ledger.py` shape, every key
   present, partial when the deadline hits).
-- `app/check/receipts.py` (L3): `check(research) -> [Receipt]`.
+- `app/check/receipts.py` (L6): `check(research) -> [Receipt]`.
 - `app/judge/judge.py` (L3): `judge(research, receipts) -> Verdict` (guards applied: `app/judge/guards.py`).
 - `app/pipeline.py` (L3): `check_vendor(url, run_dir, deadline=None, research_fn=None) -> Verdict`; writes
   `identity.json`, `research.json`, `receipts.json`, `verdict.json`, `trace.md` into `run_dir`.
