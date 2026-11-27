@@ -1,0 +1,5 @@
+{"id": "ctl-stripe", "url": "https://stripe.com", "product": "Stripe", "vendor": "Stripe, Inc.", "expect": "not_red", "why": "indisputably solid: large, alive, public payments platform"}
+{"id": "ctl-sentry", "url": "https://sentry.io", "product": "Sentry", "vendor": "Functional Software, Inc.", "expect": "not_red", "why": "indisputably solid: widely used error monitoring, active open-source releases"}
+{"id": "ctl-grafana", "url": "https://grafana.com", "product": "Grafana", "vendor": "Grafana Labs", "expect": "not_red", "why": "indisputably solid: alive observability vendor with frequent releases"}
+{"id": "ctl-pocket", "url": "https://getpocket.com", "product": "Pocket", "vendor": "Mozilla", "expect": "red_or_yellow", "why": "publicly ended: Mozilla shut Pocket down on 8 July 2025 (export until October 2025)"}
+{"id": "ctl-atom", "url": "https://atom.io", "product": "Atom", "vendor": "GitHub", "expect": "red_or_yellow", "why": "publicly ended: GitHub sunset the Atom editor on 15 Dec 2022 and archived its repositories"}

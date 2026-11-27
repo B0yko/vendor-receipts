@@ -1,0 +1,2 @@
+# Generic words that may appear in the agent's files although a labelled product or vendor shares the name.
+# One per line: the word, then "# reason". Only generic English or technical words; never a distinctive name.
