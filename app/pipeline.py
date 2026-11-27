@@ -1,4 +1,4 @@
-"""One product end to end: research -> receipt checks -> judge -> verdict + trace (lane L5).
+"""One product end to end: research -> receipt checks -> disconfirmation -> judge -> verdict + trace (lane L5).
 
     v = pipeline.check_vendor(url, "runs/<run_id>/<slug>", deadline=time.time() + 1200,
                               hints={"id": "3", "product": "Acme Notes", "vendor": "Acme Ltd"})
@@ -6,11 +6,16 @@
 hints (from the blind CSV) go to research(url, deadline=deadline, hints=hints); a research function without a hints
 parameter is called without them. verdict["id"] = hints["id"] when given.
 Writes identity.json, research.json, receipts.json, verdict.json and trace.md into run_dir. The verdict gets trace,
-run_id (the parent folder of run_dir), seconds, mode, and error None unless the judge set one. Any exception becomes an error verdict (Yellow,
+run_id (the parent folder of run_dir), seconds, mode, error None unless the judge set one, and stats (tool_calls,
+llm_calls, capped, receipts_kept, receipts_rejected, disconfirmation). Any exception becomes an error verdict (Yellow,
 reliability low, "missing evidence is no signal"); whatever research was written stays on disk.
+Disconfirmation (app.check.disconfirm, lane L6) runs after the receipt checks unless DISCONFIRM=0 or the module is
+absent: research, receipts, record = disconfirm(research, receipts, deadline=deadline). Its record lands in
+research["disconfirmation"]; on any exception the research and receipts from before the call are kept and the record
+is {"skipped": "<error>"}, and the run carries on.
 The lanes' modules are imported inside the functions, so each lane can land on its own.
 """
-import inspect, json, os, time, traceback
+import copy, inspect, json, os, time, traceback
 
 from app import ledger, model
 from app.out import trace as trace_md
@@ -39,6 +44,45 @@ def _call(fn, url, deadline, hints):
 def _check(research):
     from app.check.receipts import check
     return check(research)
+
+
+def _disconfirm(research, receipts, deadline=None):
+    from app.check.disconfirm import disconfirm
+    return disconfirm(research, receipts, deadline=deadline)
+
+
+def disconfirmation(research, receipts, deadline=None):
+    """-> (research, receipts) with research["disconfirmation"] set to the record or to {"skipped": why}. Never raises."""
+    if os.environ.get("DISCONFIRM", "1").strip() == "0":
+        research["disconfirmation"] = {"skipped": "DISCONFIRM=0"}
+        return research, receipts
+    before = (copy.deepcopy(research), copy.deepcopy(receipts))
+    t0 = time.time()
+    try:
+        out = _disconfirm(research, receipts, deadline=deadline)
+        if not (isinstance(out, tuple) and len(out) == 3 and isinstance(out[0], dict) and isinstance(out[1], list)
+                and isinstance(out[2], dict)):
+            raise TypeError(f"disconfirm returned {type(out).__name__}, not (research, receipts, record)")
+        research, receipts, record = out
+    except ModuleNotFoundError as e:
+        research, receipts = before
+        why = "not available (no app.check.disconfirm)" if e.name == "app.check.disconfirm" else f"{type(e).__name__}: {e}"
+        record = {"skipped": why}
+    except Exception as e:  # noqa: BLE001 (a failed stretch step never costs the verdict)
+        traceback.print_exc()
+        research, receipts = before
+        record = {"skipped": f"{type(e).__name__}: {e}"}
+    record.setdefault("seconds", round(time.time() - t0, 1))
+    research["disconfirmation"] = record
+    return research, receipts
+
+
+def _stats(research, receipts):
+    st = (research or {}).get("stats") or {}
+    return {"tool_calls": st.get("tool_calls", 0), "llm_calls": st.get("llm_calls", 0),
+            "capped": bool(st.get("capped")), "receipts_kept": sum(1 for r in receipts or [] if r.get("kept")),
+            "receipts_rejected": sum(1 for r in receipts or [] if not r.get("kept")),
+            "disconfirmation": trace_md.disconfirmation_summary(research)}
 
 
 def _judge(research, receipts):
@@ -98,6 +142,9 @@ def check_vendor(url, run_dir, deadline=None, research_fn=None, hints=None):
         _dump(run_dir, "research.json", research)
         receipts = _check(research)
         _dump(run_dir, "receipts.json", receipts)
+        research, receipts = disconfirmation(research, receipts, deadline)
+        _dump(run_dir, "research.json", research)
+        _dump(run_dir, "receipts.json", receipts)
         v = dict(_judge(research, receipts))
         ident = research.get("identity") or {}
         for k in ("product", "vendor", "parent", "former_names"):
@@ -117,7 +164,8 @@ def check_vendor(url, run_dir, deadline=None, research_fn=None, hints=None):
     if (hints or {}).get("id"):
         v["id"] = hints["id"]
     v.setdefault("model", model.model_id())
-    v.update({"trace": trace_path, "run_id": run_id, "seconds": round(time.time() - t0, 1), "mode": model.mode()})
+    v.update({"trace": trace_path, "run_id": run_id, "seconds": round(time.time() - t0, 1), "mode": model.mode(),
+              "stats": _stats(research, receipts)})
     try:
         _dump(run_dir, "trace.md", trace_md.render(research or ledger.new_research(url), receipts, v))
     except Exception as e:  # noqa: BLE001 (a broken trace must not lose the verdict)

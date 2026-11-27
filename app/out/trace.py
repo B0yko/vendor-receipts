@@ -3,9 +3,10 @@
     md = trace.render(research, receipts, verdict)   # Markdown string; never raises on missing keys
 
 Sections: header (url, color, reliability and why, model, run id, seconds, capped); 1 identity and anchors with
-receipt ids; 2 the matrix, all 24 rows; 3 claims ledger; 4 decision path (flags per bucket with their receipts, guard
-log, reasoning, would flip, blind spots, vendor questions, buyer next step; every flag shows its url and full quote,
-whitespace collapsed, never cut, so a checker can find it on the page); 5 rejected receipts, failed sources and
+receipt ids; 2 the matrix, all 24 rows; 3 claims ledger; 4 decision path (disconfirmation: targets, queries, outcome
+per target with why and new receipts, or the skip reason; judge views with their agreement; flags per bucket with
+their receipts and any disconfirmation outcome, guard log, reasoning, would flip, blind spots, vendor questions, buyer next step; every flag shows its url and full quote,
+whitespace collapsed, never cut, so a checker can find it on the page; a step that did not run says "Not run."); 5 rejected receipts, failed sources and
 limits; research rounds; appendix with every kept receipt, full quote and checks.
 """
 import json
@@ -58,6 +59,115 @@ def _args(a):
     return a
 
 
+def _tid(t):
+    """The receipt id (or probe name) a disconfirmation target or outcome refers to."""
+    if isinstance(t, dict):
+        t = t.get("id") or t.get("target") or t.get("receipt") or t.get("evidence") or t.get("probe") or ""
+    if isinstance(t, (list, tuple)):
+        t = ", ".join(str(x) for x in t)
+    return _inline(t)
+
+
+def _target(t, by_id):
+    tid, text, extra = _tid(t), "", ""
+    if isinstance(t, dict):
+        text = t.get("text") or t.get("probe") or t.get("claim") or t.get("hypothesis") or t.get("question") or ""
+        extra = ", ".join(_inline(t[k]) for k in ("severity", "category", "kind") if t.get(k) not in (None, ""))
+    rc = by_id.get(tid) or {}
+    text = _inline(text or rc.get("text"))
+    if rc and not extra:
+        extra = ", ".join(x for x in (rc.get("severity"), rc.get("author_type")) if x)
+    out = tid if not text or text == tid else f"{tid}: {text}"
+    return out + (f" ({extra})" if extra else "")
+
+
+def _receipt_state(rid, by_id):
+    rc = by_id.get(rid)
+    if rc is None:
+        return f"{rid} (not in the receipts list)"
+    if "kept" not in rc:
+        return rid
+    return f"{rid} kept" if rc.get("kept") else f"{rid} rejected ({_inline(rc.get('why')) or 'no reason given'})"
+
+
+def _query(q):
+    if not isinstance(q, dict):
+        return _inline(q)
+    args = q.get("args") if isinstance(q.get("args"), dict) else {}
+    text = q.get("query") or args.get("query") or q.get("q") or ""
+    tool = q.get("tool") or q.get("topic") or args.get("topic") or ""
+    res = q.get("results")
+    n = len(res) if isinstance(res, list) else (q.get("n_results") if q.get("n_results") is not None else res)
+    out = (f"[{_tid(q.get('target'))}] " if q.get("target") else "") + (f"{tool}: " if tool else "")
+    out += f"`{_inline(text).replace('`', "'")}`"
+    if n is not None:
+        out += f" · {n} results"
+    if q.get("error"):
+        out += f" · error: {_inline(q['error'])}"
+    return out
+
+
+def disconfirmation_summary(research):
+    d = (research or {}).get("disconfirmation")
+    if not d:
+        return "not run"
+    if d.get("skipped"):
+        return f"skipped ({_inline(d['skipped'])})"
+    outs = [_inline(o.get("outcome") or "?") for o in d.get("outcomes") or []]
+    tail = ", ".join(f"{outs.count(x)} {x}" for x in dict.fromkeys(outs))
+    n = len(d.get("targets") or [])
+    return f"{n} target{'' if n == 1 else 's'}" + (f": {tail}" if tail else "")
+
+
+def _disconfirmation(r, by_id):
+    d = r.get("disconfirmation")
+    L = ["", "### Disconfirmation (before the judge)"]
+    if not d:
+        return L + ["Not run."]
+    if d.get("skipped"):
+        return L + [f"Not run: skipped ({_inline(d['skipped'])})."]
+    targets, queries, outcomes = d.get("targets") or [], d.get("queries") or [], d.get("outcomes") or []
+    L.append(f"Ran: {disconfirmation_summary(r)}; {len(queries)} queries"
+             + (f"; {d['seconds']} s" if d.get("seconds") is not None else "") + ".")
+    L += ["", "Targets:"] + ([f"- {_target(t, by_id)}" for t in targets] or ["- none"])
+    L += ["", "Queries run:"] + ([f"- {_query(q)}" for q in queries] or ["- none"])
+    L += [""]
+    if outcomes:
+        L += _table(("Target", "Outcome", "Why", "New receipts"),
+                    [(_tid(o.get("target")), o.get("outcome", "?"), o.get("why"),
+                      [_receipt_state(i, by_id) for i in o.get("evidence") or []]) for o in outcomes])
+    else:
+        L.append("No outcome recorded.")
+    return L
+
+
+def views_summary(verdict):
+    views = [x for x in (verdict or {}).get("views") or [] if isinstance(x, dict)]
+    if not views:
+        return "not run"
+    colors = [x.get("overall") for x in views if x.get("overall")]
+    if not colors:
+        return f"0/{len(views)} views answered"
+    top = max(dict.fromkeys(colors), key=colors.count)
+    n = colors.count(top)
+    final = (verdict or {}).get("overall", "?")
+    if n * 2 <= len(views) and len(set(colors)) > 1:
+        return ("no majority: " + ", ".join(f"{c} {colors.count(c)}" for c in dict.fromkeys(colors))
+                + f" of {len(views)} views; final {final}")
+    return f"{n}/{len(views)} views say {top}; final {final}"
+
+
+def _views(v):
+    views = [x for x in v.get("views") or [] if isinstance(x, dict)]
+    L = ["", "### Judge views"]
+    if not views:
+        return L + ["Not run (one judge call)."]
+    L += [f"Agreement: {views_summary(v)}.", ""]
+    return L + _table(("View", "Overall", "Reliability", "Key receipts"),
+                      [(x.get("view", "?"), x.get("overall") or "no answer", x.get("reliability"),
+                        x.get("key_receipts") or []) for x in views])
+
+
 def render(research, receipts, verdict):
     r, v = research or {}, verdict or {}
     receipts = receipts or []
@@ -73,6 +183,7 @@ def render(research, receipts, verdict):
          f"- Model: {v.get('model', '?')} · mode: {v.get('mode', '?')} · run id: {v.get('run_id', '?')}",
          f"- Seconds: {v.get('seconds', r.get('seconds', '?'))} (research {r.get('seconds', '?')}) · capped: "
          f"{_yn(stats.get('capped'))} · tool calls: {stats.get('tool_calls', 0)} · model calls: {stats.get('llm_calls', 0)}"]
+    L.append(f"- Disconfirmation: {disconfirmation_summary(r)} · judge views: {views_summary(v)}")
     if v.get("error"):
         L.append(f"- Error: {v['error']} (missing evidence is no signal)")
     L += ["", "## 1 Identity and anchors", ""]
@@ -112,6 +223,11 @@ def render(research, receipts, verdict):
     L += _table(("Id", "Claim", "Status", "Receipts", "Note"), crow) if crow else ["No site claims recorded."]
 
     L += ["", "## 4 Decision path"]
+    L += _disconfirmation(r, by_id)
+    L += _views(v)
+    dis = {}
+    for o in (r.get("disconfirmation") or {}).get("outcomes") or []:
+        dis.setdefault(_tid(o.get("target")), o)
     for key, label in BUCKETS:
         flags = v.get(key) or []
         L += ["", f"### {label} ({len(flags)})"]
@@ -136,6 +252,10 @@ def render(research, receipts, verdict):
                          f"{rc.get('author_type', '?')} · checks: {_checks(rc)}")
                 if _inline(rc.get("quote")) != quote:
                     L.append(f"    - Quote: \"{_inline(rc.get('quote'))}\"")
+                if rid in dis:
+                    o = dis[rid]
+                    L.append(f"    - Disconfirmation: {o.get('outcome', '?')} ({_inline(o.get('why')) or 'no reason given'})"
+                             + (f"; new receipts {', '.join(o.get('evidence'))}" if o.get("evidence") else ""))
     L += ["", "### Guard log"] + ([f"- {g}" for g in v.get("guards") or []] or ["No guard fired."])
     L += ["", "### Reasoning", "", str(v.get("reasoning") or "–")]
     L += ["", "### Would flip", "", str(v.get("would_flip") or "–")]
@@ -183,6 +303,9 @@ def render(research, receipts, verdict):
               f"{x.get('category', '?')} · severity {x.get('severity', '?')} · polarity {x.get('polarity', '?')}",
               f"- Domain: {x.get('domain', '?')} · independent: {_yn(x.get('independent'))}"
               + (f" · repost of {x['dup_of']}" if x.get("dup_of") else ""),
-              f"- Checks: {_checks(x)}", f"- Source: {_cell(x.get('source_title'))}", ""]
+              f"- Checks: {_checks(x)}", f"- Source: {_cell(x.get('source_title'))}"]
+        if x.get("hypothesis"):
+            L.append(f"- Hypothesis: {_inline(x['hypothesis'])}")
+        L.append("")
         L += _quote_block(x.get("quote"))
     return "\n".join(L) + "\n"

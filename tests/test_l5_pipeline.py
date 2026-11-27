@@ -1,5 +1,5 @@
 """Lane L5: writer, trace, pipeline, batch runner and CLI. Offline; check and judge are stubbed (lanes L6, L3)."""
-import contextlib, csv, io, json, os, shutil, sys, tempfile, unittest
+import contextlib, csv, io, json, os, shutil, sys, tempfile, time, unittest
 from unittest import mock
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -49,11 +49,48 @@ def stub_judge(research, receipts):
             "guards": ["guard 4: dropped 1 flag without a kept receipt"], "model": "stub"}
 
 
+def absent_disconfirm(research, receipts, deadline=None):
+    """Today's main: app.check.disconfirm does not exist yet (and the real one must never run in these tests)."""
+    raise ModuleNotFoundError("No module named 'app.check.disconfirm'", name="app.check.disconfirm")
+
+
+def stub_disconfirm(research, receipts, deadline=None):
+    """Like lane L6: one target (e3) survives with two new receipts, one kept and one rejected."""
+    new = [{"id": "e10", "category": 6, "text": "No second maintainer announced since", "url": "https://dev.example.net/x",
+            "quote": "still a one-person shop", "date": "2026-11-01", "author_type": "trade_press",
+            "severity": "moderate", "polarity": "negative", "hypothesis": "disconfirmation of e3: a second engineer?",
+            "checks": {"resolves": True, "same_company": True, "says_it": True, "dated": True}, "kept": True, "why": "",
+            "domain": "example.net", "independent": True, "dup_of": None},
+           {"id": "e11", "category": 6, "text": "A same-name shop hired", "url": "https://other.example.net/y",
+            "quote": "Acme hires", "date": "", "author_type": "aggregator", "severity": "minor", "polarity": "neutral",
+            "checks": {"resolves": True, "same_company": False, "says_it": True, "dated": False}, "kept": False,
+            "why": "same name, different company", "domain": "example.net", "independent": True, "dup_of": None}]
+    record = {"targets": ["e3"],
+              "queries": [{"target": "e3", "tool": "search", "query": '"Acme" second engineer', "results": [1, 2]},
+                          {"target": "e3", "tool": "news", "query": '"Acme" hires', "error": "timeout"}],
+              "outcomes": [{"target": "e3", "outcome": "survived", "why": "nothing newer says otherwise",
+                            "evidence": ["e10", "e11"]}],
+              "seconds": 12.5, "deadline_seen": deadline is not None}
+    research["evidence"] = research["evidence"] + [{k: x[k] for k in x if k not in ("checks", "kept", "why")}
+                                                   for x in new]
+    research["disconfirmation"] = record
+    return research, receipts + new, record
+
+
+VIEWS = [{"view": "all", "overall": "Yellow", "reliability": "medium", "key_receipts": ["e3"]},
+         {"view": "external", "overall": "Yellow", "reliability": "high", "key_receipts": ["e3", "e10"]},
+         {"view": "devil", "overall": "Green", "reliability": "low", "key_receipts": ["e2"]}]
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
-        for name, fn in (("_check", stub_check), ("_judge", stub_judge)):
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("DISCONFIRM", None)
+        for name, fn in (("_check", stub_check), ("_judge", stub_judge), ("_disconfirm", absent_disconfirm)):
             p = mock.patch.object(pipeline, name, side_effect=fn)
             p.start()
             self.addCleanup(p.stop)
@@ -213,6 +250,11 @@ class TestRun(Base):
         self.assertEqual([c["slug"] for c in m["cases"]], ["example-org", "example-com"])
         self.assertTrue(all(c["overall"] == "Yellow" and c["error"] is None for c in m["cases"]))
         self.assertIn("commit", m["git"])
+        self.assertEqual(m["disconfirm"], "1")
+        org = m["cases"][0]
+        self.assertEqual({k: org[k] for k in run.STAT_KEYS},
+                         {"tool_calls": 3, "llm_calls": 3, "capped": False, "receipts_kept": 3, "receipts_rejected": 1,
+                          "disconfirmation": "skipped (not available (no app.check.disconfirm))"})
         self.assertTrue(os.path.exists(os.path.join(runs, "t1", "example-com", "trace.md")))
         self.assertRegex(self.err.getvalue(), r"\[2/2\] example-(com|org) Yellow \d+s")
 
@@ -323,6 +365,95 @@ class TestBlindAndSubmission(Base):
         rc[2]["quote"] = long
         md = trace.render(r, rc, stub_judge(r, rc))
         self.assertIn(f"  - Quote: \"{long.strip()}\"", md)
+
+
+
+class TestDisconfirmAndViews(Base):
+    def run_one(self, slug="example-org"):
+        rd = os.path.join(self.dir, "runs", "d1", slug)
+        v = pipeline.check_vendor("https://" + slug.replace("-", "."), rd, deadline=time.time() + 900,
+                                  research_fn=self.research_fn)
+        files = {}
+        for f in ("research.json", "receipts.json"):
+            with open(os.path.join(rd, f)) as fh:
+                files[f] = json.load(fh)
+        with open(os.path.join(rd, "trace.md")) as fh:
+            files["trace.md"] = fh.read()
+        return v, files
+
+    def test_disconfirm_record_lands_in_research_json_and_trace(self):
+        with mock.patch.object(pipeline, "_disconfirm", side_effect=stub_disconfirm) as d:
+            v, f = self.run_one()
+        self.assertEqual(d.call_count, 1)
+        rec = f["research.json"]["disconfirmation"]
+        self.assertEqual((rec["targets"], rec["outcomes"][0]["outcome"], rec["deadline_seen"]), (["e3"], "survived", True))
+        self.assertEqual([x["id"] for x in f["receipts.json"]][-2:], ["e10", "e11"])
+        self.assertIn("e10", [e["id"] for e in f["research.json"]["evidence"]])
+        self.assertIsNone(v["error"])
+        self.assertEqual(v["stats"]["disconfirmation"], "1 target: 1 survived")
+        self.assertEqual((v["stats"]["receipts_kept"], v["stats"]["receipts_rejected"]), (4, 2))
+        t = f["trace.md"]
+        sec = t.split("### Disconfirmation (before the judge)")[1].split("### Judge views")[0]
+        self.assertIn("Ran: 1 target: 1 survived; 2 queries; 12.5 s.", sec)
+        self.assertIn("- e3: One person builds and releases the product", sec)
+        self.assertIn('- [e3] search: `"Acme" second engineer` · 2 results', sec)
+        self.assertIn("· error: timeout", sec)
+        self.assertIn("| e3 | survived | nothing newer says otherwise | e10 kept, e11 rejected (same name, different company) |",
+                      sec)
+        self.assertIn("    - Disconfirmation: survived (nothing newer says otherwise); new receipts e10, e11", t)
+        self.assertIn("- Hypothesis: disconfirmation of e3: a second engineer?", t)
+        self.assertIn("- Disconfirmation: 1 target: 1 survived · judge views: not run", t)
+
+    def test_disconfirm_off_is_not_called(self):
+        os.environ["DISCONFIRM"] = "0"
+        with mock.patch.object(pipeline, "_disconfirm", side_effect=stub_disconfirm) as d:
+            v, f = self.run_one()
+        self.assertEqual(d.call_count, 0)
+        self.assertEqual(f["research.json"]["disconfirmation"], {"skipped": "DISCONFIRM=0"})
+        self.assertNotIn("e10", [x["id"] for x in f["receipts.json"]])
+        self.assertIn("### Disconfirmation (before the judge)\nNot run: skipped (DISCONFIRM=0).", f["trace.md"])
+        self.assertEqual(v["stats"]["disconfirmation"], "skipped (DISCONFIRM=0)")
+
+    def test_disconfirm_absent_or_failing_keeps_the_research(self):
+        v, f = self.run_one()
+        self.assertEqual(f["research.json"]["disconfirmation"]["skipped"], "not available (no app.check.disconfirm)")
+
+        def breaks(research, receipts, deadline=None):
+            research["evidence"].append({"id": "e50"})
+            receipts.append({"id": "e50", "kept": True})
+            raise RuntimeError("plan call failed")
+        with mock.patch.object(pipeline, "_disconfirm", side_effect=breaks):
+            v, f = self.run_one()
+        self.assertIsNone(v["error"])
+        self.assertEqual(f["research.json"]["disconfirmation"]["skipped"], "RuntimeError: plan call failed")
+        self.assertNotIn("e50", [e["id"] for e in f["research.json"]["evidence"]])
+        self.assertNotIn("e50", [x["id"] for x in f["receipts.json"]])
+        with mock.patch.object(pipeline, "_disconfirm", return_value=None):
+            v, f = self.run_one()
+        self.assertIn("TypeError: disconfirm returned NoneType", f["research.json"]["disconfirmation"]["skipped"])
+
+    def test_views_render_with_agreement(self):
+        r = fixture("example-org")
+        rc = stub_check(r)
+        md = trace.render(r, rc, stub_judge(r, rc) | {"views": VIEWS})
+        sec = md.split("### Judge views")[1].split("### Red flags")[0]
+        self.assertIn("Agreement: 2/3 views say Yellow; final Yellow.", sec)
+        self.assertIn("| external | Yellow | high | e3, e10 |", sec)
+        self.assertIn("| devil | Green | low | e2 |", sec)
+        self.assertIn("judge views: 2/3 views say Yellow; final Yellow", md)
+        split = [VIEWS[0], VIEWS[2], VIEWS[1] | {"overall": "Red"}]
+        self.assertEqual(trace.views_summary({"views": split, "overall": "Yellow"}),
+                         "no majority: Yellow 1, Green 1, Red 1 of 3 views; final Yellow")
+        agree = [x | {"overall": "Green"} for x in VIEWS]
+        self.assertEqual(trace.views_summary({"views": agree, "overall": "Green"}), "3/3 views say Green; final Green")
+
+    def test_absent_sections_say_not_run(self):
+        r = fixture("example-com")
+        rc = stub_check(r)
+        md = trace.render(r, rc, stub_judge(r, rc))
+        self.assertIn("### Disconfirmation (before the judge)\nNot run.", md)
+        self.assertIn("### Judge views\nNot run (one judge call).", md)
+        self.assertIn("- Disconfirmation: not run · judge views: not run", md)
 
 
 class TestCli(Base):
