@@ -57,7 +57,7 @@ green:
 
 batch:
 	@mkdir -p $(dir $(OUT))
-	$(KC) $(RUN) --cases $(CASES) --out $(OUT) $(if $(ONLY),--only $(ONLY))
+	$(KC) $(RUN) --cases $(CASES) --out $(OUT) $(if $(ONLY),--only $(ONLY)) $(if $(SUBMIT),--submit $(SUBMIT))
 
 # One live product end to end (D1): make one URL=https://...
 one:
