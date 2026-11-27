@@ -58,7 +58,9 @@ What you see in the user message:
 
 {ledger.GUARDS}
 Code applies these four guards after you: a flag that breaks one is dropped or moved and the color is corrected, so
-build every flag and the color so that it survives them.
+build every flag and the color so that it survives them. In particular: a red flag whose receipts are all vendor_self
+moves to yellow (a claim is never proof) unless a contradicted claim check cites one of them, and a Green with any red
+flag left becomes Yellow.
 
 {ledger.REVIEW_RULES}
 
