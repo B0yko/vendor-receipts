@@ -52,8 +52,8 @@ screenshots shown as the vendor's own), or several contradicted claims on one si
 small team, an old design or few public mentions is not a contradiction and is never critical on its own.
 
 Green does not mean flawless. A Green product is alive (dated recent activity or receipted scale) with no caveat that
-blocks the shortlist, and it still carries yellow flags the buyer should note. A caveat makes the call Yellow only if
-the buyer must resolve it before shortlisting: it bears directly on the core promise, matters for this buyer's segment
+blocks the shortlist, and it still carries yellow flags the buyer should note. A caveat makes the call Yellow when the
+buyer must check it before signing: it bears directly on the core promise, matters for this buyer's segment
 and is specific to this product (an unresolved incident, an ownership change with a visible effect, an end of life or
 freeze, a missing certification the pitch relies on, terms weakened against the promise). The ordinary caveats of a
 long-lived, maintained product stay yellow flags on a Green: community or volunteer support for open source, security
