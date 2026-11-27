@@ -4,7 +4,8 @@
 
 Sections: header (url, color, reliability and why, model, run id, seconds, capped); 1 identity and anchors with
 receipt ids; 2 the matrix, all 24 rows; 3 claims ledger; 4 decision path (flags per bucket with their receipts, guard
-log, reasoning, would flip, blind spots, vendor questions, buyer next step); 5 rejected receipts, failed sources and
+log, reasoning, would flip, blind spots, vendor questions, buyer next step; every flag shows its url and full quote,
+whitespace collapsed, never cut, so a checker can find it on the page); 5 rejected receipts, failed sources and
 limits; research rounds; appendix with every kept receipt, full quote and checks.
 """
 import json
@@ -22,6 +23,11 @@ def _cell(x, limit=None):
     if limit and len(s) > limit:
         s = s[:limit - 1] + "…"
     return s or "–"
+
+
+def _inline(x):
+    """One line of prose (not a table cell): whitespace collapsed, nothing escaped or cut, so quotes stay verbatim."""
+    return " ".join(str(x if x is not None else "").split())
 
 
 def _table(head, rows):
@@ -112,17 +118,24 @@ def render(research, receipts, verdict):
         if not flags:
             L.append("None.")
         for f in flags:
-            L.append(f"- **{_cell(f.get('text'))}** (category {f.get('category', '?')}, {f.get('severity', '?')}, "
-                     f"basis {f.get('basis', '?')}, corroboration {f.get('corroboration', '?')})")
             ids = f.get("receipts") or []
-            if not ids:
-                L.append(f"  - {f.get('url', '')}: \"{_cell(f.get('quote'))}\" ({f.get('date') or 'undated'}, "
-                         f"{f.get('author', '?')})")
+            first = by_id.get(ids[0], {}) if ids else {}
+            quote = _inline(first.get("quote") or f.get("quote"))
+            L += [f"- **{_inline(f.get('text'))}** (category {f.get('category', '?')}, {f.get('severity', '?')}, "
+                  f"basis {f.get('basis', '?')}, corroboration {f.get('corroboration', '?')})",
+                  f"  - URL: {f.get('url') or first.get('url', '')}",
+                  f"  - Quote: \"{quote}\"",
+                  f"  - Date: {f.get('date') or first.get('date') or 'undated'} · author: "
+                  f"{f.get('author') or first.get('author_type', '?')}"]
             for rid in ids:
-                rc = by_id.get(rid, {})
-                L.append(f"  - {rid}: \"{_cell(rc.get('quote') or f.get('quote'), 300)}\" "
-                         f"{rc.get('url') or f.get('url', '')} · {rc.get('date') or 'undated'} · "
+                rc = by_id.get(rid)
+                if rc is None:
+                    L.append(f"  - Receipt {rid}: not in the receipts list")
+                    continue
+                L.append(f"  - Receipt {rid}: {rc.get('url', '')} · {rc.get('date') or 'undated'} · "
                          f"{rc.get('author_type', '?')} · checks: {_checks(rc)}")
+                if _inline(rc.get("quote")) != quote:
+                    L.append(f"    - Quote: \"{_inline(rc.get('quote'))}\"")
     L += ["", "### Guard log"] + ([f"- {g}" for g in v.get("guards") or []] or ["No guard fired."])
     L += ["", "### Reasoning", "", str(v.get("reasoning") or "–")]
     L += ["", "### Would flip", "", str(v.get("would_flip") or "–")]

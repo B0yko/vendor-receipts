@@ -7,13 +7,20 @@
 CSV columns (Stackgini's): url, product, vendor, overall, green_flags, yellow_flags, red_flags, reasoning. Each flag is
 "text (url)", joined by "; ". The full CSV adds reliability, reliability_why, blind_spots, buyer_next_step,
 vendor_questions, would_flip, trace. Rows keep the order of the list given (the runner passes input order).
+
+Submission (Stackgini, 17:12 rules): writer.write_submission([(case, verdict), ...], DIR) writes
+DIR/stackgini-verdicts.csv (id,url,product,vendor,overall,green_flags,yellow_flags,red_flags,reasoning; product and
+vendor from the input case when given, else from the verdict's identity) and DIR/traces/<id>.md: the product's
+trace.md under one header line that links its CSV row.
 """
-import csv, json, os, threading
+import csv, json, os, re, threading
 
 COLUMNS = ("url", "product", "vendor", "overall", "green_flags", "yellow_flags", "red_flags", "reasoning")
 FULL_EXTRA = ("reliability", "reliability_why", "blind_spots", "buyer_next_step", "vendor_questions", "would_flip",
               "trace")
 FULL_COLUMNS = COLUMNS + FULL_EXTRA
+SUBMIT_COLUMNS = ("id", "url", "product", "vendor", "overall", "green_flags", "yellow_flags", "red_flags", "reasoning")
+SUBMIT_CSV = "stackgini-verdicts.csv"
 _lock = threading.Lock()
 
 
@@ -78,3 +85,45 @@ def write_csv(verdicts, path):
             for v in verdicts:
                 w.writerow(row(v, full))
     return path, full_path(path)
+
+
+def safe_id(i):
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(i)).strip("-.") or "case"
+
+
+def _trace_text(verdict):
+    p = verdict.get("trace") or ""
+    if p and os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    from app import ledger
+    from app.out import trace
+    return trace.render(ledger.new_research(verdict.get("url", "")), [], verdict)
+
+
+def write_submission(rows, out_dir):
+    """rows: [(case {"id", "url", "product"?, "vendor"?}, verdict)] in input order. -> (csv path, [trace paths])."""
+    tdir = os.path.join(out_dir, "traces")
+    os.makedirs(tdir, exist_ok=True)
+    csv_path, traces, names = os.path.join(out_dir, SUBMIT_CSV), [], set()
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=SUBMIT_COLUMNS)
+        w.writeheader()
+        for n, (case, v) in enumerate(rows):
+            r = row(v)
+            r.update({"id": case["id"], "url": case.get("url") or v.get("url", ""),
+                      "product": _one_line(case.get("product")) or r["product"],
+                      "vendor": _one_line(case.get("vendor")) or r["vendor"]})
+            w.writerow({k: r[k] for k in SUBMIT_COLUMNS})
+            name = safe_id(case["id"])
+            while name in names:
+                name += "_"
+            names.add(name)
+            line = n + 2  # header is line 1; every field is one line, so row n sits on line n + 2
+            head = (f"> Submission row: [{SUBMIT_CSV} line {line}](../{SUBMIT_CSV}#L{line}) · id {case['id']} · "
+                    f"{r['url']} · {r['product'] or '?'} ({r['vendor'] or '?'}) · overall **{r['overall']}**\n\n")
+            tp = os.path.join(tdir, name + ".md")
+            with open(tp, "w", encoding="utf-8") as t:
+                t.write(head + _trace_text(v))
+            traces.append(tp)
+    return csv_path, traces

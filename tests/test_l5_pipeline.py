@@ -62,8 +62,8 @@ class Base(unittest.TestCase):
         r.__enter__()
         self.addCleanup(r.__exit__, None, None, None)
 
-    def research_fn(self, url, deadline=None):
-        return run.fake_research_fn(url, deadline)
+    def research_fn(self, url, deadline=None, hints=None):
+        return run.fake_research_fn(url, deadline, hints)
 
 
 class TestWriter(Base):
@@ -104,6 +104,7 @@ class TestWriter(Base):
 class TestTrace(Base):
     def test_sections_and_24_matrix_rows(self):
         r = fixture("example-com")
+        r["matrix"]["9"]["note"] = "a | b\nc"
         rc = stub_check(r)
         v = stub_judge(r, rc) | {"run_id": "r1", "seconds": 3.0, "mode": "fake"}
         md = trace.render(r, rc, v)
@@ -119,7 +120,8 @@ class TestTrace(Base):
         self.assertIn("e99", md.split("## 5")[1])                      # rejected receipt with its reason
         self.assertIn("same name, different company", md)
         self.assertIn("> Version 2.4.0 (2026-10-14): faster search and CSV export.", md)  # full quote in appendix
-        self.assertIn("Caveat with \\| a pipe and a newline", md)        # table-safe text
+        self.assertIn("**Caveat with | a pipe and a newline**", md)      # prose keeps the text
+        self.assertIn("| a \\| b c |", md)                                # table cells stay table-safe
         self.assertIn("guard 4: dropped", md)
 
     def test_render_survives_an_empty_research(self):
@@ -232,6 +234,95 @@ class TestRun(Base):
         line = json.loads(open(out).read())
         self.assertEqual((line["overall"], line["url"]), ("Yellow", "https://example.net"))
         self.assertIn("FileNotFoundError", line["error"])
+
+
+BLIND = ('\ufeffid,url,product,vendor\r\n'
+         '7,https://example.org,"Acme Notes, Field Edition","Acme ""Notes"" Ltd"\r\n'
+         ',https://example.com,,\r\n')
+
+
+class TestBlindAndSubmission(Base):
+    def blind(self, text=BLIND):
+        p = os.path.join(self.dir, "blind.csv")
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        return p
+
+    def test_blind_csv_parse_quoted_fields_and_bom(self):
+        cs = run.read_cases(self.blind())
+        self.assertEqual([(c["id"], c["url"], c["product"], c["vendor"]) for c in cs],
+                         [("7", "https://example.org", "Acme Notes, Field Edition", 'Acme "Notes" Ltd'),
+                          ("example-com", "https://example.com", "", "")])
+        self.assertEqual(run.hints_of(cs[0]), {"id": "7", "product": "Acme Notes, Field Edition",
+                                               "vendor": 'Acme "Notes" Ltd'})
+        dup = run.read_cases(self.blind("id,url\na,https://example.com\na,https://example.org\n"))
+        self.assertEqual([c["id"] for c in dup], ["a", "a-2"])
+
+    def test_hints_reach_research_and_id_reaches_verdict(self):
+        seen = []
+
+        def research(url, deadline=None, hints=None):
+            seen.append((url, hints, deadline is not None))
+            return run.fake_research_fn(url)
+        out = os.path.join(self.dir, "v.jsonl")
+        with mock.patch.dict(os.environ, {"RUN_ID": "h1"}):
+            run.run_cases(run.read_cases(self.blind()), out, 2, 60, runs_dir=os.path.join(self.dir, "runs"),
+                          research_fn=research)
+        self.assertEqual(sorted(seen), [
+            ("https://example.com", {"id": "example-com", "product": "", "vendor": ""}, True),
+            ("https://example.org", {"id": "7", "product": "Acme Notes, Field Edition", "vendor": 'Acme "Notes" Ltd'},
+             True)])
+        self.assertEqual(sorted(json.loads(x)["id"] for x in open(out)), ["7", "example-com"])
+        with open(os.path.join(self.dir, "runs", "h1", "example-org", "verdict.json")) as f:
+            self.assertEqual(json.load(f)["id"], "7")
+
+    def test_research_without_hints_param_still_runs(self):
+        v = pipeline.check_vendor("https://example.com", os.path.join(self.dir, "r", "x"),
+                                  research_fn=lambda url, deadline=None: run.fake_research_fn(url),
+                                  hints={"id": "9", "product": "", "vendor": ""})
+        self.assertIsNone(v["error"])
+        self.assertEqual(v["id"], "9")
+
+    def test_judge_error_is_kept(self):
+        with mock.patch.object(pipeline, "_judge", side_effect=lambda r, rc: stub_judge(r, rc) | {"error": "judge: x"}):
+            v = pipeline.check_vendor("https://example.com", os.path.join(self.dir, "r", "y"),
+                                      research_fn=self.research_fn)
+        self.assertEqual(v["error"], "judge: x")
+
+    def test_submission_csv_and_one_trace_per_id(self):
+        sub, out = os.path.join(self.dir, "sub"), os.path.join(self.dir, "v.jsonl")
+        with mock.patch.dict(os.environ, {"RUN_ID": "s1", "RECEIPTS_FAKE": "1"}):
+            self.assertEqual(run.main(["--cases", self.blind(), "--out", out, "--runs-dir",
+                                       os.path.join(self.dir, "runs"), "--submit", sub]), 0)
+        with open(os.path.join(sub, "stackgini-verdicts.csv"), newline="", encoding="utf-8") as f:
+            text = f.read()
+        rows = list(csv.reader(io.StringIO(text)))
+        self.assertEqual(rows[0], ["id", "url", "product", "vendor", "overall", "green_flags", "yellow_flags",
+                                   "red_flags", "reasoning"])
+        d = [dict(zip(rows[0], r)) for r in rows[1:]]
+        self.assertEqual([(x["id"], x["url"]) for x in d], [("7", "https://example.org"), ("example-com", "https://example.com")])
+        self.assertEqual((d[0]["product"], d[0]["vendor"]), ("Acme Notes, Field Edition", 'Acme "Notes" Ltd'))
+        self.assertEqual((d[1]["product"], d[1]["vendor"]), ("Acme Ledger", "Acme Ledger GmbH"))  # from identity
+        self.assertEqual(d[0]["yellow_flags"],
+                         "Caveat with | a pipe and a newline (https://dev.example.net/acme-notes-maintainer)")
+        self.assertEqual(len(text.splitlines()), 3)  # one line per row, so the trace's line link holds
+        self.assertEqual(sorted(os.listdir(os.path.join(sub, "traces"))), ["7.md", "example-com.md"])
+        t = open(os.path.join(sub, "traces", "7.md"), encoding="utf-8").read()
+        self.assertTrue(t.startswith("> Submission row: [stackgini-verdicts.csv line 2](../stackgini-verdicts.csv#L2)"
+                                     " · id 7 · https://example.org"))
+        self.assertIn("## 2 Matrix (24 categories)", t)
+        r = fixture("example-org")
+        for e in r["evidence"][1:]:  # every flag's url and full quote sit under it, verbatim
+            self.assertIn(f"  - Quote: \"{e['quote']}\"", t)
+            self.assertIn(f"  - URL: {e['url']}", t)
+
+    def test_long_quote_is_never_cut(self):
+        r = fixture("example-org")
+        rc = stub_check(r)
+        long = "word " * 200 + "end | of quote"
+        rc[2]["quote"] = long
+        md = trace.render(r, rc, stub_judge(r, rc))
+        self.assertIn(f"  - Quote: \"{long.strip()}\"", md)
 
 
 class TestCli(Base):
