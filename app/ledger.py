@@ -178,8 +178,10 @@ Fields that carry the weight: author type, severity, link to the core promise, c
 more independent sources), reliability in words (high / medium / low, with the reason)."""
 
 GUARDS = """Four guards in code (app/judge/guards.py), because a model can break them:
-1. No Red without an external receipt (author type other than vendor_self, not on the vendor's domains) or a
-   receipted contradiction on the vendor's own site (a claim check with status contradicted and a kept receipt).
+1. No Red without an external receipt (independent: not on the vendor's domains, author type other than
+   vendor_self), a vendor statement against its own interest (author type vendor_against_interest, e.g. an end-of-life
+   notice, on any domain), or a receipted contradiction on the vendor's own site (a claim check with status
+   contradicted and a kept receipt).
 2. User reviews are never the only basis of a flag (a flag whose kept receipts are all user_review is dropped).
 3. Looks never change the color (category 14 findings never make a Red, and never make a Yellow on their own).
 4. A failed source is no signal, never a negative (a yellow or red flag without a kept receipt is dropped)."""
