@@ -208,6 +208,9 @@ def _backoff(e, attempt):
 def _tavily(endpoint, body=None, timeout=60, deadline=None):
     """POST (body given) or GET to the Tavily API -> parsed JSON. Raises ToolError (never cached). Every attempt takes
     a rate-limiter slot; 429 and 5xx are retried within the budget (`deadline`, else MAX_WAIT s of waiting)."""
+    if os.environ.get("TAVILY_CACHE_ONLY") == "1" and endpoint in ("/search", "/extract", "/research"):
+        # evaluation re-runs under a credit ceiling: only cached answers; a miss is a failed source, never a call
+        raise ToolError(f"tavily {endpoint.strip('/')}: not cached (TAVILY_CACHE_ONLY=1)")
     key = os.environ.get("TAVILY_API_KEY", "")
     if not key:
         raise ToolError("TAVILY_API_KEY not set (run through make or kc env TAVILY_API_KEY=tavily-api-key --)")
