@@ -5,6 +5,7 @@
 #                               and traces/<id>.md. Default CSV data/blind.csv (columns id,url,product,vendor).
 #   tools/blind.sh rerun IDS    re-run failed ids (comma list) into runs/rerun.jsonl and merge them into the submission.
 #   tools/blind.sh rebuild [CSV] write the submission from runs/verdicts.jsonl without running (after a stop or crash).
+#   tools/blind.sh rejudge REV  judge-only re-run at commit REV from the research cache, then the rebuilt submission.
 #   tools/blind.sh ship         redact labelled-set sources unless ALLOW_LABELLED=1, commit stackgini-verdicts.csv and
 #                               traces/, push main through the pre-push guard (never --no-verify).
 #   tools/blind.sh flip         full-history publish check, then the visibility flip only on PASS.
@@ -100,6 +101,22 @@ case ${1:-} in
     RUN_ID=${RUN_ID:-blind-rerun} batch "$CSV" runs/rerun.jsonl "${KEY_B:-tavily-api-key-2}" /tmp/vr-rl-key2 "ONLY=$2"
     rebuild "$CSV"
     echo "blind: submission rebuilt from runs/verdicts.jsonl"
+    ;;
+  rejudge)
+    # judge-only re-run of the blind products at another commit (REV), from the research cache: no new Tavily calls
+    # (TAVILY_CACHE_ONLY=1), research, checks and disconfirmation replay; then the full submission is rebuilt
+    [ -n "${2:-}" ] || die "rejudge needs a commit or tag"
+    TAG=$2; CSV=${3:-data/blind.csv}
+    worktree
+    (cd "$W" && halves "$CSV")
+    ext=${CSV##*.}; [ "$ext" = csv ] || ext=jsonl
+    rm -f "$W"/runs/verdicts_a.jsonl "$W"/runs/verdicts_b.jsonl "$W"/runs/rerun.jsonl
+    export TAVILY_CACHE_ONLY=1
+    (RUN_ID=${RUN_ID:-blind} batch "runs/blind_half_a.$ext" runs/verdicts_a.jsonl "${KEY_A:-tavily-api-key}" /tmp/vr-rl-key1 > "$W/runs/rejudge_a.log" 2>&1) &
+    (RUN_ID=${RUN_ID:-blind} batch "runs/blind_half_b.$ext" runs/verdicts_b.jsonl "${KEY_B:-tavily-api-key-2}" /tmp/vr-rl-key2 > "$W/runs/rejudge_b.log" 2>&1) &
+    wait
+    rebuild "$CSV"
+    echo "blind: re-judged at $TAG; next: tools/blind.sh ship"
     ;;
   rebuild)
     worktree
