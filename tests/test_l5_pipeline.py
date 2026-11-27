@@ -7,6 +7,8 @@ sys.path.insert(0, ROOT)
 from app import cli, ledger, pipeline, run  # noqa: E402
 from app.out import trace, writer  # noqa: E402
 
+REAL_JUDGE_WRAPPER = pipeline._judge  # Base stubs pipeline._judge; the cap tests run the real wrapper
+
 FX = os.path.join(ROOT, "tests", "fixtures", "research")
 
 
@@ -38,7 +40,7 @@ def flag(rc, text, basis="confirmed"):
             "basis": basis, "receipts": [rc["id"]]}
 
 
-def stub_judge(research, receipts):
+def stub_judge(research, receipts, views=None):
     kept = {r["id"]: r for r in receipts if r["kept"]}
     g = [flag(kept["e2"], "Dated releases continue")]
     y = [flag(kept["e3"], "Caveat with | a pipe\nand a newline")]
@@ -47,6 +49,22 @@ def stub_judge(research, receipts):
             "blind_spots": ["hosting", "certifications"], "buyer_next_step": "Ask for escrow.",
             "vendor_questions": ["Q1?", "Q2?", "Q3?"], "would_flip": "A second maintainer.",
             "guards": ["guard 4: dropped 1 flag without a kept receipt"], "model": "stub"}
+
+
+def absent_audit(verdict, receipts):
+    """Today's main: app.check.audit does not exist yet (and the real one must never run in these tests)."""
+    raise ModuleNotFoundError("No module named 'app.check.audit'", name="app.check.audit")
+
+
+def stub_audit(verdict, receipts):
+    """Like lane L6: drops the uncited sentence, flags a flag whose url has no kept receipt."""
+    v = dict(verdict)
+    v["reasoning"] = "Alive [e2]; caveat [e3]."
+    v["audit"] = {"kept_sentences": 1, "removed": [{"sentence": "Everyone loves it.", "why": "cites no receipt"}],
+                  "cited_ids": ["e2", "e3"], "uncited_flags": [{"bucket": "green", "text": "Dated releases continue",
+                                                                "url": "https://example.org/releases"}],
+                  "advice": ["A buyer should ask for escrow."]}
+    return v
 
 
 def absent_disconfirm(research, receipts, deadline=None):
@@ -89,8 +107,10 @@ class Base(unittest.TestCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("DISCONFIRM", None)
-        for name, fn in (("_check", stub_check), ("_judge", stub_judge), ("_disconfirm", absent_disconfirm)):
+        for k in ("DISCONFIRM", "JUDGE_VIEWS", "AUDIT"):
+            os.environ.pop(k, None)
+        for name, fn in (("_check", stub_check), ("_judge", stub_judge), ("_disconfirm", absent_disconfirm),
+                         ("_audit", absent_audit)):
             p = mock.patch.object(pipeline, name, side_effect=fn)
             p.start()
             self.addCleanup(p.stop)
@@ -254,9 +274,16 @@ class TestRun(Base):
         org = m["cases"][0]
         self.assertEqual({k: org[k] for k in run.STAT_KEYS},
                          {"tool_calls": 3, "llm_calls": 3, "capped": False, "receipts_kept": 3, "receipts_rejected": 1,
-                          "disconfirmation": "skipped (not available (no app.check.disconfirm))"})
+                          "disconfirmation": "skipped (not available (no app.check.disconfirm))",
+                          "audit": "skipped (not available (no app.check.audit))", "steps": org["steps"]})
+        self.assertEqual(list(org["steps"]), list(pipeline.STEPS))
+        self.assertTrue(all(isinstance(x, float) for x in org["steps"].values()))
+        self.assertEqual(sorted(m["steps"]), sorted(pipeline.STEPS))
+        self.assertEqual(m["steps"]["judge"]["n"], 2)
+        self.assertEqual((m["audit"], m["single_view_below"]), ("1", 300))
         self.assertTrue(os.path.exists(os.path.join(runs, "t1", "example-com", "trace.md")))
-        self.assertRegex(self.err.getvalue(), r"\[2/2\] example-(com|org) Yellow \d+s")
+        self.assertRegex(self.err.getvalue(), r"\[2/2\] example-(com|org) Yellow \d+s \(research \d+ · check \d+ · "
+                                              r"disconfirm \d+ · judge \d+ · audit \d+\)")
 
     def test_only_replaces_selected_lines(self):
         cases = self.cases_file('{"url": "https://example.org"}\n{"url": "https://example.com"}\n')
@@ -454,6 +481,123 @@ class TestDisconfirmAndViews(Base):
         self.assertIn("### Disconfirmation (before the judge)\nNot run.", md)
         self.assertIn("### Judge views\nNot run (one judge call).", md)
         self.assertIn("- Disconfirmation: not run · judge views: not run", md)
+
+
+
+class TestCapAuditSteps(Base):
+    def run_one(self, left=None, judge_fn=None, slug="example-org"):
+        rd = os.path.join(self.dir, "runs", "a1", slug)
+        deadline = None if left is None else time.time() + left
+        if judge_fn is None:
+            return pipeline.check_vendor("https://" + slug.replace("-", "."), rd, deadline=deadline,
+                                         research_fn=self.research_fn), rd
+        j = mock.create_autospec(judge_fn, side_effect=judge_fn)  # keeps judge_fn's signature (views or not)
+        with mock.patch.object(pipeline, "_judge", REAL_JUDGE_WRAPPER), mock.patch("app.judge.judge.judge", j):
+            v = pipeline.check_vendor("https://" + slug.replace("-", "."), rd, deadline=deadline,
+                                      research_fn=self.research_fn)
+        self.calls = j.call_args_list
+        return v, rd
+
+    def test_judge_single_view_near_the_cap(self):
+        v, _ = self.run_one(left=200, judge_fn=stub_judge)
+        self.assertEqual(self.calls[0].kwargs, {"views": 1})
+        self.assertIn("judge: single view (cap)", v["guards"])
+        self.assertIsNone(v["error"])
+
+    def test_judge_default_views_with_time_left(self):
+        for left in (None, 900):
+            v, _ = self.run_one(left=left, judge_fn=stub_judge)
+            self.assertEqual(self.calls[0].kwargs, {})
+            self.assertNotIn("judge: single view (cap)", v["guards"])
+
+    def test_judge_views_rule(self):
+        now = 1000.0
+        self.assertEqual(pipeline.judge_views(now + 299, now), 1)
+        self.assertEqual(pipeline.judge_views(now - 5, now), 1)
+        self.assertIsNone(pipeline.judge_views(now + 300, now))
+        self.assertIsNone(pipeline.judge_views(None, now))
+        os.environ["JUDGE_VIEWS"] = "1"  # already one view: nothing to change, nothing to log
+        self.assertIsNone(pipeline.judge_views(now + 10, now))
+
+    def test_judge_without_views_arg_is_still_called(self):
+        v, _ = self.run_one(left=100, judge_fn=lambda research, receipts: stub_judge(research, receipts))
+        self.assertIsNone(v["error"])
+        self.assertEqual(self.calls[0].kwargs, {})
+        self.assertIn("judge: single view wanted (cap), but this judge takes no views arg", v["guards"])
+
+    def test_audit_runs_and_shows_in_the_trace(self):
+        with mock.patch.object(pipeline, "_audit", side_effect=stub_audit) as a:
+            v, rd = self.run_one()
+        self.assertEqual(a.call_count, 1)
+        self.assertEqual([r["id"] for r in a.call_args.args[1]][-1], "e99")  # gets the receipts
+        self.assertEqual(v["reasoning"], "Alive [e2]; caveat [e3].")
+        self.assertEqual(v["stats"]["audit"], "1 sentences kept, 1 removed, 1 uncited flags")
+        with open(os.path.join(rd, "verdict.json")) as f:
+            self.assertEqual(json.load(f)["audit"]["cited_ids"], ["e2", "e3"])
+        t = open(os.path.join(rd, "trace.md")).read()
+        sec = t.split("### Audit (after the judge)")[1].split("### Would flip")[0]
+        self.assertIn("Ran: 1 sentences kept, 1 removed, 1 uncited flags; cited receipts e2, e3.", sec)
+        self.assertIn('- "Everyone loves it.": cites no receipt', sec)
+        self.assertIn("- Dated releases continue (green · https://example.org/releases)", sec)
+        self.assertIn("Advice:\n- A buyer should ask for escrow.", sec)
+        self.assertIn("· audit: 1 sentences kept, 1 removed, 1 uncited flags", t)
+
+    def test_audit_absent_off_or_failing_leaves_the_verdict(self):
+        v, rd = self.run_one()
+        self.assertEqual(v["audit"], {"skipped": "not available (no app.check.audit)"})
+        self.assertIn("### Audit (after the judge)\nNot run: skipped (not available (no app.check.audit)).",
+                      open(os.path.join(rd, "trace.md")).read())
+        self.assertFalse(any(g.startswith("audit") for g in v["guards"]))
+
+        def breaks(verdict, receipts):
+            verdict["reasoning"] = "mangled"
+            raise RuntimeError("bad split")
+        with mock.patch.object(pipeline, "_audit", side_effect=breaks):
+            v, rd = self.run_one()
+        self.assertEqual(v["reasoning"], "Alive [e2]; caveat [e3].")
+        self.assertEqual(v["audit"], {"skipped": "RuntimeError: bad split"})
+        self.assertIn("audit failed, verdict left as judged: RuntimeError: bad split", v["guards"])
+        self.assertIsNone(v["error"])
+        with mock.patch.object(pipeline, "_audit", return_value={"audit": {}}):
+            v, _ = self.run_one()
+        self.assertIn("TypeError", v["audit"]["skipped"])
+        self.assertEqual(v["overall"], "Yellow")
+        os.environ["AUDIT"] = "0"
+        with mock.patch.object(pipeline, "_audit", side_effect=stub_audit) as a:
+            v, _ = self.run_one()
+        self.assertEqual((a.call_count, v["audit"]), (0, {"skipped": "AUDIT=0"}))
+
+    def test_absent_audit_says_not_run(self):
+        r = fixture("example-com")
+        md = trace.render(r, stub_check(r), stub_judge(r, stub_check(r)))
+        self.assertIn("### Audit (after the judge)\nNot run.", md)
+        self.assertNotIn("- Steps (wall s)", md)
+
+    def test_steps_in_stats_and_trace(self):
+        v, rd = self.run_one()
+        st = v["stats"]["steps"]
+        self.assertEqual(list(st), ["research", "check", "disconfirm", "judge", "audit"])
+        self.assertTrue(all(isinstance(x, float) and x >= 0 for x in st.values()))
+        self.assertRegex(open(os.path.join(rd, "trace.md")).read(),
+                         r"- Steps \(wall s\): research [\d.]+ · check [\d.]+ · disconfirm [\d.]+ · judge [\d.]+ · "
+                         r"audit [\d.]+")
+
+    def test_steps_measure_wall_time_and_stop_at_a_failure(self):
+        clock = iter(float(x) for x in range(0, 1000, 5))
+        with mock.patch.object(pipeline.time, "time", side_effect=lambda: next(clock)):
+            v, _ = self.run_one()
+        st = v["stats"]["steps"]  # one tick per plain step; disconfirmation reads the clock itself
+        self.assertEqual((st["research"], st["check"], st["judge"], st["audit"]), (5.0, 5.0, 5.0, 5.0), st)
+
+        def boom(r, rc, views=None):
+            raise ValueError("judge broke")
+        with mock.patch.object(pipeline, "_judge", side_effect=boom):
+            v, rd = self.run_one()
+        st = v["stats"]["steps"]
+        self.assertEqual(v["error"], "ValueError: judge broke")
+        self.assertIsInstance(st["judge"], float)
+        self.assertIsNone(st["audit"])
+        self.assertIn("audit not reached", open(os.path.join(rd, "trace.md")).read())
 
 
 class TestCli(Base):
