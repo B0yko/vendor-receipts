@@ -7,11 +7,18 @@ a string. Contract: SPEC.md § Interfaces.
 
 Tavily (search, news, extract) goes over urllib with `Authorization: Bearer $TAVILY_API_KEY`. Every successful answer
 is cached by request (`cache.cached`, key = endpoint + body; the key travels in a header, never in the cache); an error
-is never cached. A 429 is retried after Retry-After (capped at 20 s), 3 tries in all. A plan or usage-limit error
-(HTTP 432/433, or a body naming the plan, credits or a usage limit) appends one line to runs/alerts.log and stderr.
+is never cached. Every Tavily HTTP call (never a cache hit) first takes a slot of the rate limiter shared by all
+processes on this Mac: TAVILY_RPM (90) calls per rolling 60 s, state in TAVILY_RL_DIR (/tmp/vendor-receipts-tavily-rl)
+under an fcntl lock. A 429 or 5xx is retried up to 6 times after Retry-After (else backoff 2, 4, 8, 16 s + jitter)
+while the caller's `deadline` allows (no deadline: at most 90 s of waiting in all). A plan or usage-limit error (HTTP
+432/433, or a body naming the plan, credits or a usage limit) is never retried and appends one line to
+runs/alerts.log and stderr. Each successful uncached call appends {"at", "endpoint", "credits", "depth", "urls_ok"} to
+runs/tavily_credits.jsonl; `python3 -m app.research.tools credits` prints the total and the last-10-minute rate.
 Vendor pages go through `cache.http_get` (1 request/s per host, no logins). REPLAY=1 turns a cache miss into an error.
 """
-import datetime, html.parser, inspect, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import datetime, fcntl, html.parser, inspect, json, os, random, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
+
+from email.utils import parsedate_to_datetime
 
 import cache
 from app.ledger import registrable
@@ -20,7 +27,10 @@ TAVILY = os.environ.get("TAVILY_URL", "https://api.tavily.com")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ALERTS = os.environ.get("ALERTS_LOG", os.path.join(ROOT, "runs", "alerts.log"))
 TEXT_CAP, LINK_CAP = 80_000, 400
-RETRY_CAP, TRIES = 20.0, 3
+RETRY_CAP = 20.0                       # open-data APIs (_get): one retry, Retry-After capped
+TAVILY_TRIES, MAX_WAIT, BACKOFF = 7, 90.0, (2, 4, 8, 16)   # Tavily: the call plus up to 6 retries
+WINDOW = 60.0
+CREDITS_LOG = os.environ.get("TAVILY_CREDITS_LOG", os.path.join(ROOT, "runs", "tavily_credits.jsonl"))
 _alert_lock = threading.Lock()
 _LIMIT_RE = re.compile(r"\bplan'?s?\b|\bcredits?\b|usage limit|pay-as-you-go|\bpaygo\b|\bquota\b", re.I)
 
@@ -78,37 +88,165 @@ def _retry_after(headers, attempt):
 
 
 def _is_limit(code, msg):
-    return code in (432, 433) or (code != 434 and bool(_LIMIT_RE.search(msg or "")))
+    return code in (432, 433) or (code == 429 and bool(_LIMIT_RE.search(msg or "")))
 
 
-def _tavily(endpoint, body=None, timeout=60):
-    """POST (body given) or GET to the Tavily API -> parsed JSON. Raises ToolError (never cached)."""
+class _Budget:
+    """Waiting allowed for one Tavily call: until `deadline` (epoch s) if given, else MAX_WAIT seconds of sleep."""
+
+    def __init__(self, deadline=None):
+        self.deadline, self.waited = deadline, 0.0
+
+    def left(self):
+        return self.deadline - time.time() if self.deadline is not None else MAX_WAIT - self.waited
+
+    def sleep(self, s):
+        """Sleep s seconds -> True, or False (no sleep) when that would pass the budget."""
+        left = self.left()
+        if s > left or (self.deadline is not None and s == left):
+            return False
+        if s > 0:
+            time.sleep(s)
+            self.waited += s
+        return True
+
+
+class Bucket:
+    """At most `rpm` calls per rolling WINDOW seconds across every process: a JSON list of call times in
+    <dir>/bucket.json, read and written under fcntl.flock (separate opens exclude each other, threads included)."""
+
+    def __init__(self, dir=None, rpm=None):
+        self.dir = dir or os.environ.get("TAVILY_RL_DIR", "/tmp/vendor-receipts-tavily-rl")
+        self.rpm = int(os.environ.get("TAVILY_RPM", 90) if rpm is None else rpm)
+        if self.rpm < 1:
+            raise ValueError("TAVILY_RPM must be positive")
+        self.path = os.path.join(self.dir, "bucket.json")
+
+    def _locked(self, take):
+        os.makedirs(self.dir, mode=0o700, exist_ok=True)
+        # Lock a stable inode. Atomic replacement keeps the previous window intact if a worker dies.
+        with open(self.path + '.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                with open(self.path) as f:
+                    ts = json.load(f)
+            except FileNotFoundError:
+                ts = []
+            now = time.time()
+            ts = sorted(t for t in ts if t > now - WINDOW)
+            wait = 0.0 if len(ts) < self.rpm else ts[-self.rpm] + WINDOW - now
+            if take and wait <= 0:
+                ts.append(now)
+                with open(self.path + '.tmp', 'w') as f:
+                    json.dump(ts, f)
+                os.replace(self.path + '.tmp', self.path)
+            return wait, len(ts)
+
+    def try_take(self):
+        """Take a slot -> 0.0, or the seconds until one frees up (nothing taken)."""
+        return max(self._locked(True)[0], 0.0)
+
+    def in_window(self):
+        return self._locked(False)[1]
+
+    def acquire(self, budget):
+        """Block until a slot is taken; ToolError when the wait would pass the budget."""
+        while True:
+            if budget.deadline is not None and budget.left() <= 0:
+                raise ToolError("tavily: deadline reached before request")
+            wait = self.try_take()
+            if wait <= 0:
+                return
+            if not budget.sleep(wait):
+                raise ToolError(f"tavily rate limiter: {self.rpm} calls in the last {WINDOW:.0f} s, next slot in "
+                                f"{wait:.0f} s goes past the deadline or the {MAX_WAIT:.0f} s wait cap")
+
+
+def _credits(endpoint, body, resp):
+    """Prefer the charge on the response; otherwise apply the depth rate per search or per five successful extracts."""
+    resp = resp if isinstance(resp, dict) else {}
+    ok = len(resp.get("results") or [])
+    depth, credits = None, 0
+    if endpoint == "/search":
+        depth = body.get("search_depth", "basic")
+        credits = 2 if depth == "advanced" else 1
+    elif endpoint == "/extract":
+        depth = body.get("extract_depth", "basic")
+        credits = ok * (2 if depth == "advanced" else 1) / 5
+    usage = resp.get("usage")
+    if isinstance(usage, dict) and isinstance(usage.get("credits"), (int, float)):
+        credits = usage["credits"]
+    return credits, depth, ok
+
+
+def _log_credits(endpoint, body, resp):
+    c, depth, ok = _credits(endpoint, body or {}, resp)
+    line = json.dumps({"at": _now(), "endpoint": endpoint.strip("/"), "credits": c, "depth": depth, "urls_ok": ok})
+    try:
+        with _alert_lock:
+            os.makedirs(os.path.dirname(CREDITS_LOG) or ".", exist_ok=True)
+            with open(CREDITS_LOG, "a") as f:
+                f.write(line + "\n")
+    except OSError as e:
+        print(f"credits: cannot write {CREDITS_LOG}: {e}", file=sys.stderr)
+
+
+def _backoff(e, attempt):
+    """Retry-After when the answer has one (honoured as given), else 2, 4, 8, 16, 16, ... s plus jitter."""
+    v = (e.headers.get("Retry-After") if e.headers is not None else None) or ""
+    if v.strip().isascii() and v.strip().isdigit():
+        return float(v)
+    try:
+        return max(0.0, parsedate_to_datetime(v).timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return BACKOFF[min(attempt, len(BACKOFF)) - 1] + random.uniform(0, 1)
+
+
+def _tavily(endpoint, body=None, timeout=60, deadline=None):
+    """POST (body given) or GET to the Tavily API -> parsed JSON. Raises ToolError (never cached). Every attempt takes
+    a rate-limiter slot; 429 and 5xx are retried within the budget (`deadline`, else MAX_WAIT s of waiting)."""
     key = os.environ.get("TAVILY_API_KEY", "")
     if not key:
         raise ToolError("TAVILY_API_KEY not set (run through make or kc env TAVILY_API_KEY=tavily-api-key --)")
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
     data = None
     if body is not None:
-        data, headers["Content-Type"] = json.dumps(body).encode(), "application/json"
-    name = endpoint.strip("/")
-    for attempt in range(1, TRIES + 1):
+        payload = dict(body, include_usage=True) if endpoint in ("/search", "/extract") else body
+        data, headers["Content-Type"] = json.dumps(payload).encode(), "application/json"
+    name, budget, bucket, last = endpoint.strip("/"), _Budget(deadline), Bucket(), ""
+    for attempt in range(1, TAVILY_TRIES + 1):
+        try:
+            bucket.acquire(budget)
+        except ToolError as e:
+            if last:
+                raise ToolError(f"{last} ({e})") from e
+            raise
         req = urllib.request.Request(TAVILY + endpoint, data=data, headers=headers,
                                      method="POST" if body is not None else "GET")
+        t = timeout if deadline is None else min(timeout, budget.left())
+        if t <= 0:
+            raise ToolError(last or f"tavily {name}: deadline reached before request")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8", "replace"))
+            with urllib.request.urlopen(req, timeout=t) as r:
+                resp = json.loads(r.read().decode("utf-8", "replace"))
+            _log_credits(endpoint, body, resp)
+            return resp
         except urllib.error.HTTPError as e:
             msg = _http_error_message(e)
+            last = f"tavily {name} HTTP {e.code} {msg}"
             if _is_limit(e.code, msg):
                 alert("tavily", name, e.code, msg)
-                raise ToolError(f"tavily {name} HTTP {e.code} {msg}")
-            if e.code == 429 and attempt < TRIES:
-                time.sleep(_retry_after(e.headers, attempt))
-                continue
-            raise ToolError(f"tavily {name} HTTP {e.code} {msg}")
+                raise ToolError(last)
+            if (e.code == 429 or 500 <= e.code < 600) and attempt < TAVILY_TRIES:
+                wait = _backoff(e, attempt)
+                if budget.sleep(wait):
+                    continue
+                raise ToolError(f"{last} (no retry after {attempt} tries: waiting {wait:.0f} s more goes past the "
+                                f"deadline or the {MAX_WAIT:.0f} s wait cap)")
+            raise ToolError(last + (f" after {attempt} tries" if attempt > 1 else ""))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             raise ToolError(f"tavily {name}: {type(e).__name__}: {e}"[:300])
-    raise ToolError(f"tavily {name}: retries exhausted")
+    raise ToolError(f"tavily {name}: retries exhausted ({last})")
 
 
 def _domains(v):
@@ -119,8 +257,9 @@ def _domains(v):
 
 # ---------------------------------------------------------------------------------------------------- Tavily tools
 def search(query, topic="general", time_range=None, depth="advanced", max_results=8, include_domains=None,
-           exclude_domains=None):
-    """Tavily /search -> {"query", "results": [{"url", "title", "content", "published_date", "score"}], "error"}."""
+           exclude_domains=None, deadline=None):
+    """Tavily /search -> {"query", "results": [{"url", "title", "content", "published_date", "score"}], "error"}.
+    `deadline` (epoch s, not a model arg): rate-limit and retry waits stop there."""
     out = {"query": query, "results": [], "error": None}
     try:
         body = {"query": str(query), "search_depth": depth, "topic": topic or "general",
@@ -133,7 +272,7 @@ def search(query, topic="general", time_range=None, depth="advanced", max_result
             body["include_domains"] = _domains(include_domains)
         if _domains(exclude_domains):
             body["exclude_domains"] = _domains(exclude_domains)
-        raw = cache.cached("tavily_search", body, lambda: _tavily("/search", body))
+        raw = cache.cached("tavily_search", body, lambda: _tavily("/search", body, deadline=deadline))
         out["results"] = [{"url": r.get("url") or "", "title": r.get("title") or "", "content": r.get("content") or "",
                            "published_date": r.get("published_date"), "score": r.get("score")}
                           for r in raw.get("results") or [] if r.get("url")]
@@ -142,13 +281,13 @@ def search(query, topic="general", time_range=None, depth="advanced", max_result
     return out
 
 
-def news(query, time_range="year", max_results=8, include_domains=None, exclude_domains=None):
+def news(query, time_range="year", max_results=8, include_domains=None, exclude_domains=None, deadline=None):
     """search() with topic "news" (published dates on every result), default window one year."""
     return search(query, topic="news", time_range=time_range, max_results=max_results,
-                  include_domains=include_domains, exclude_domains=exclude_domains)
+                  include_domains=include_domains, exclude_domains=exclude_domains, deadline=deadline)
 
 
-def extract(urls, depth="advanced"):
+def extract(urls, depth="advanced", deadline=None):
     """Tavily /extract in batches of 20 -> {"results": [{"url", "text", "published_date"}], "failed": [{"url",
     "error"}], "error"}. Text is plain (format "text", so quotes copy verbatim), capped at 80k chars per page."""
     out = {"results": [], "failed": [], "error": None}
@@ -162,7 +301,8 @@ def extract(urls, depth="advanced"):
             batch = lst[i:i + 20]
             body = {"urls": batch, "extract_depth": depth, "format": "text", "include_published_date": True}
             try:
-                raw = cache.cached("tavily_extract", body, lambda: _tavily("/extract", body, timeout=120))
+                raw = cache.cached("tavily_extract", body,
+                                   lambda: _tavily("/extract", body, timeout=120, deadline=deadline))
             except Exception as e:
                 out["error"] = _short(e)
                 out["failed"] += [{"url": u, "error": out["error"]} for u in batch]
@@ -176,12 +316,12 @@ def extract(urls, depth="advanced"):
     return out
 
 
-def usage():
+def usage(*, deadline=None):
     """Tavily /usage (not cached; the endpoint allows 10 requests per 10 minutes) -> its JSON plus "error"."""
     if cache.replay():
         return {"error": "REPLAY=1: usage is not available offline"}
     try:
-        d = _tavily("/usage", None, timeout=20)
+        d = _tavily("/usage", None, timeout=20, deadline=deadline)
         return {**(d if isinstance(d, dict) else {"value": d}), "error": None}
     except Exception as e:
         return {"error": _short(e)}
@@ -659,8 +799,9 @@ def tool_docs():
     return "\n".join(f"- {t['doc']}" for t in TOOLS.values())
 
 
-def run_tool(name, args=None):
-    """Validate and run one tool -> its dict plus "tool", "args", "seconds". Never raises."""
+def run_tool(name, args=None, deadline=None):
+    """Validate and run one tool -> its dict plus "tool", "args", "seconds". Never raises. `deadline` (epoch s) goes to
+    the tools that wait (Tavily rate limit and retries); it is never a model arg."""
     t0 = time.time()
     args = args if args is not None else {}
     base = {"tool": name, "args": args}
@@ -680,11 +821,46 @@ def run_tool(name, args=None):
                and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
     if missing:
         return fail(f"missing args {missing} for {name}")
+    kw = {"deadline": deadline} if deadline is not None and "deadline" in params else {}
     try:
-        out = spec["fn"](**args)
+        out = spec["fn"](**args, **kw)
     except Exception as e:  # the tools never raise; this is the last net
         out = {"error": _short(e)}
     if not isinstance(out, dict):
         out = {"value": out, "error": None}
     out.setdefault("error", None)
     return {**out, **base, "seconds": round(time.time() - t0, 3)}
+
+
+def credits_report(path=None, now=None):
+    """Total credits and the last-10-minute rate from the credits log, plus the limiter's current window."""
+    path, now = path or CREDITS_LOG, now or time.time()
+    total = recent = 0.0
+    n = n_recent = 0
+    first = None
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                    at = datetime.datetime.fromisoformat(d["at"]).timestamp()
+                    c = float(d.get("credits") or 0)
+                except (ValueError, KeyError, TypeError):
+                    continue
+                total, n, first = total + c, n + 1, first or d["at"]
+                if at >= now - 600:
+                    recent, n_recent = recent + c, n_recent + 1
+    except FileNotFoundError:
+        pass
+    b = Bucket()
+    return (f"tavily credits: {total:g} in {n} calls since {first or '-'} ({path})\n"
+            f"last 10 min: {recent:g} credits in {n_recent} calls ({recent / 10:.1f} credits/min)\n"
+            f"rate limiter: {b.in_window()}/{b.rpm} calls in the last {WINDOW:.0f} s ({b.path})")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["credits"]:
+        print(credits_report(sys.argv[2] if len(sys.argv) > 2 else None))
+    else:
+        print("usage: python3 -m app.research.tools credits [log path]", file=sys.stderr)
+        sys.exit(2)

@@ -38,7 +38,9 @@ class Base(unittest.TestCase):
         self.alerts = os.path.join(self.dir, "runs", "alerts.log")
         for p in (mock.patch.object(cache, "CACHE_DIR", os.path.join(self.dir, "cache")),
                   mock.patch.object(tools, "ALERTS", self.alerts),
-                  mock.patch.dict(os.environ, {"TAVILY_API_KEY": "test-key"}),
+                  mock.patch.object(tools, "CREDITS_LOG", os.path.join(self.dir, "runs", "tavily_credits.jsonl")),
+                  mock.patch.dict(os.environ, {"TAVILY_API_KEY": "test-key", "TAVILY_RPM": "90",
+                                               "TAVILY_RL_DIR": os.path.join(self.dir, "rl")}),
                   mock.patch("sys.stderr", io.StringIO())):
             p.start()
             self.addCleanup(p.stop)
@@ -98,11 +100,11 @@ class TavilyTests(Base):
         self.assertEqual((b["topic"], b["time_range"]), ("news", "year"))
 
     def test_error_not_cached(self):
-        self.script(http_error(500, {"detail": {"error": "Internal Server Error"}}), SEARCH_OK)
+        self.script(http_error(400, {"detail": {"error": "Invalid time_range"}}), SEARCH_OK)
         r = tools.search("q")
         self.assertEqual(r["results"], [])
-        self.assertIn("HTTP 500", r["error"])
-        self.assertIn("Internal Server Error", r["error"])
+        self.assertIn("HTTP 400", r["error"])
+        self.assertIn("Invalid time_range", r["error"])
         r2 = tools.search("q")
         self.assertIsNone(r2["error"])
         self.assertEqual(len(r2["results"]), 2)
@@ -158,14 +160,13 @@ class TavilyTests(Base):
         self.assertEqual(len(self.requests), 2)
         self.assertFalse(os.path.exists(self.alerts), "a plain rate limit is no alert")
 
-    def test_retry_after_capped_and_three_tries(self):
-        busy = {"detail": {"error": "excessive requests"}}
-        self.script(http_error(429, busy, {"Retry-After": "600"}))
+    def test_5xx_retried_with_backoff(self):
+        self.script(http_error(502, {"detail": {"error": "Bad Gateway"}}), SEARCH_OK)
         with mock.patch.object(tools.time, "sleep") as sl:
             r = tools.search("q")
-        self.assertIn("HTTP 429", r["error"])
-        self.assertEqual(len(self.requests), 3)
-        self.assertEqual([c.args[0] for c in sl.call_args_list], [20.0, 20.0])
+        self.assertIsNone(r["error"])
+        self.assertEqual(len(self.requests), 2)
+        self.assertTrue(2 <= sl.call_args.args[0] <= 3, sl.call_args)
 
     def test_extract_batches_and_failed(self):
         urls = [f"https://example.com/p{i}" for i in range(25)]
