@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, ROOT)
+from app import model  # noqa: E402
 from evalkit import labels, report  # noqa: E402
 
 COLS = ["id", "url", "product", "vendor", "overall", "green_flags", "yellow_flags", "red_flags", "reasoning",
@@ -37,8 +38,15 @@ def write_preds(path, colors_by_id, extra=None):
             f.write(json.dumps(line) + "\n")
 
 
+def no_model_call(system, user):
+    raise AssertionError("these tests make no model call")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
+        for p in ("match", "extra", "classify"):
+            model.set_fake(p, no_model_call)
+        self.addCleanup(model.clear_fakes)
         self.d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.d, True)
         self.csv = os.path.join(self.d, "labels.csv")

@@ -1,18 +1,21 @@
 """Evaluation report for one split: our colors against the labels, the baselines, regressions, one line per product.
 
   python3 -m evalkit.report --preds F --split dev|holdout [--run-dir D] [--prev JSON] [--baseline-preds F]
-      [--save JSON] [--note "..."] [--log runs/log.md] [--labels CSV] --out report.md
+      [--save JSON] [--note "..."] [--log runs/log.md] [--labels CSV] [--no-model] [--concurrency N] --out report.md
 
 Writes report.md: color accuracy n/N, the 3x3 confusion (theirs x ours), per-class recall, false Red on Green (count
 and ids), Red recall, the all-Yellow baseline on the same split, the plain baseline (--baseline-preds), regressions
 against --prev (a JSON written earlier by --save: right -> wrong, and the fixes), one line per product (id, theirs,
-ours, reliability, seconds, error). Appends one line to the log (time, run id, accuracy, false Red, note).
+ours, reliability, seconds, error), and the flags and errors section (evalkit/flags.py: their flags found, verified
+extra flags, error classes, grounding, coverage; model calls skipped with --no-model). Appends one line to the log
+(time, run id, accuracy, false Red, note). Without --baseline-preds, <parent of run dir>/baseline_<run id>.jsonl is
+used when it exists (what `make baseline` writes). Holdout reports carry aggregates and per-product counts only.
 A product without a prediction counts as wrong (ours "-"). Rows are named by their CSV id; no names, flags or
 reasoning of the labels reach the report or stdout.
 """
 import argparse, json, os, sys, time
 
-from evalkit import labels as L
+from evalkit import flags as F, labels as L
 
 COLORS = L.COLORS
 
@@ -114,7 +117,7 @@ def append_log(log, run_id, split, s, note):
                 f"{len(s['false_red_on_green'])} | {str(note).replace('|', '/')} |\n")
 
 
-def main(argv=None, extra=None):
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--preds", required=True)
     ap.add_argument("--split", choices=("dev", "holdout"), required=True)
@@ -125,6 +128,8 @@ def main(argv=None, extra=None):
     ap.add_argument("--note", default="")
     ap.add_argument("--labels", help="labelled CSV (default: env LABELS, then data/...)")
     ap.add_argument("--log", default="runs/log.md")
+    ap.add_argument("--no-model", action="store_true", help="skip the matcher, extra check and error classifier")
+    ap.add_argument("--concurrency", type=int, default=int(os.environ.get("CONC") or 8))
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     if not L.exists(a.labels):
@@ -134,13 +139,18 @@ def main(argv=None, extra=None):
     preds = L.load_preds(a.preds)
     s = score(rows, preds)
     run_id = run_id_of(preds, a.run_dir)
+    if not a.baseline_preds and a.run_dir:
+        auto = os.path.join(os.path.dirname(os.path.normpath(a.run_dir)), f"baseline_{run_id}.jsonl")
+        a.baseline_preds = auto if os.path.exists(auto) else None
     base = score(rows, L.load_preds(a.baseline_preds)) if a.baseline_preds else None
     prev = None
     if a.prev and os.path.exists(a.prev):
         with open(a.prev) as f:
             prev = json.load(f)
     worse, better = regressions(s["cases"], prev) if prev else (None, None)
-    extra_md, extra_json = extra(a, rows, preds) if extra else ("", {})
+    details = a.split == "dev"
+    fl = F.analyze(rows, preds, a.run_dir, use_model=not a.no_model, concurrency=a.concurrency)
+    extra_md, extra_json = F.render(fl, details=details), {"flags": F.strip_labels(fl, details=details)}
     md = render(a.split, s, run_id, a.note, base, os.path.basename(a.baseline_preds or ""), worse, better,
                 os.path.basename(a.prev or ""), extra_md)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -157,7 +167,10 @@ def main(argv=None, extra=None):
     print(f"{a.split}: {_frac(s['correct'], s['n'])}, false Red on Green {len(s['false_red_on_green'])}, "
           f"all-Yellow {_frac(s['all_yellow']['correct'], s['n'])}"
           + (f", plain {_frac(base['correct'], base['n'])}" if base else "")
-          + (f", right->wrong {len(worse)}" if worse is not None else "") + f" -> {a.out}")
+          + (f", right->wrong {len(worse)}" if worse is not None else "")
+          + (f", their flags found {fl['totals']['found']}+{fl['totals']['partly']} partly of {fl['totals']['items']}"
+             f", extra verified {fl['totals']['extra']['verified']}/{fl['totals']['extra']['n']}" if fl["model"] else "")
+          + f" -> {a.out}")
     return 0
 
 
