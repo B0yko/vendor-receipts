@@ -53,12 +53,19 @@ def _model():
     return os.environ.get("MODEL_ID", "pi-claude-tether/claude-opus-5-5")
 
 
-def _thinking():
+RESEARCH_PURPOSES = ("intake", "round")  # the research steps (identity, site read, plan, loop, claim check)
+
+
+def _thinking(purpose=""):
+    """xhigh for every step; the research steps use MODEL_THINKING_RESEARCH (default high: Andrii 17:38, measured
+    about 2x faster than xhigh). The judge, disconfirmation, says_it and evalkit stay at MODEL_THINKING."""
+    if purpose.removesuffix("_retry") in RESEARCH_PURPOSES:
+        return os.environ.get("MODEL_THINKING_RESEARCH", "high")
     return os.environ.get("MODEL_THINKING", "xhigh")
 
 
 def model_id():
-    return "fake" if mode() == "fake" else f"{_model()}:{_thinking()}"
+    return "fake" if mode() == "fake" else f"{_model()}:{_thinking()} (research {_thinking('intake')})"
 
 
 def _accounts():
@@ -123,7 +130,7 @@ def _global_slot():
 def _pi(system, user, purpose, account):
     cmd = [os.environ.get("PI_BIN", "pi"), "-p", "--no-session", "--no-tools", "--no-mcp", "--no-skills",
            "--no-prompt-templates", "--no-context-files", "--system-prompt", system, "--model", _model(),
-           "--thinking", _thinking()]
+           "--thinking", _thinking(purpose)]
     env = dict(os.environ, PI_CLAUDE_TETHER_ACCOUNT=account)
     t0 = time.time()
     with _semaphore(), _global_slot():
@@ -135,6 +142,7 @@ def _pi(system, user, purpose, account):
             rc, out, err = -9, "", "timeout"
     secs = round(time.time() - t0, 1)
     _log("runs/model_calls.jsonl", {"at": time.strftime("%H:%M:%S"), "purpose": purpose, "account": account,
+                                    "thinking": _thinking(purpose),
                                     "seconds": secs, "in_chars": len(system) + len(user), "out_chars": len(out),
                                     "rc": rc, "err": err[-200:] if rc else ""})
     return rc, out, err
@@ -172,7 +180,7 @@ def _parse(text):
 
 
 def _ask(system, user, purpose):
-    key = {"system": system, "user": user, "purpose": purpose, "model": _model(), "thinking": _thinking()}
+    key = {"system": system, "user": user, "purpose": purpose, "model": _model(), "thinking": _thinking(purpose)}
     return cache.cached("model", key, lambda: _text(system, user, purpose))["text"]
 
 

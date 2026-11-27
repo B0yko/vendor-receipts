@@ -22,7 +22,7 @@ class ModelTest(unittest.TestCase):
         with open(b, "w") as f:
             f.write(FAKE)
         os.chmod(b, os.stat(b).st_mode | stat.S_IEXEC)
-        self.env = mock.patch.dict(os.environ, {"PI_BIN": b, "MODEL_ACCOUNTS": "default,acct3", "RECEIPTS_FAKE": "", "MODEL_SLOTS_DIR": os.path.join(self.d, "slots0"),
+        self.env = mock.patch.dict(os.environ, {"PI_BIN": b, "MODEL_ACCOUNTS": "default,acct3", "RECEIPTS_FAKE": "", "MODEL_THINKING": "xhigh", "MODEL_THINKING_RESEARCH": "high", "MODEL_SLOTS_DIR": os.path.join(self.d, "slots0"),
                                                 "REPLAY": ""})
         self.env.start()
         self.cd = mock.patch.object(cache, "CACHE_DIR", os.path.join(self.d, "c"))
@@ -48,6 +48,12 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(seen, {"acct3"})
         with open("runs/alerts.log") as f:
             self.assertIn("limit", f.read())
+
+    def test_research_steps_think_high_judge_xhigh(self):
+        self.assertEqual(model._thinking("intake"), "high")
+        self.assertEqual(model._thinking("round_retry"), "high")
+        self.assertEqual(model._thinking("judge"), "xhigh")
+        self.assertEqual(model._thinking("disconfirm"), "xhigh")
 
     def test_never_acct2(self):
         with mock.patch.dict(os.environ, {"MODEL_ACCOUNTS": "acct2"}):
