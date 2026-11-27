@@ -56,6 +56,12 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(model._thinking("judge"), "xhigh")
         self.assertEqual(model._thinking("disconfirm"), "xhigh")
 
+    def test_hard_stop_refuses_new_calls(self):
+        import time as _t
+        with mock.patch.dict(os.environ, {"MODEL_HARD_STOP": str(_t.time() + 2)}):
+            with self.assertRaises(model.ModelError):
+                model.ask_json("sys", "late call", "t")
+
     def test_never_acct2(self):
         with mock.patch.dict(os.environ, {"MODEL_ACCOUNTS": "acct2"}):
             self.assertEqual(model._accounts(), ["default"])

@@ -33,9 +33,10 @@ def cached(name, args, fn):
     print(f"cache miss {name} {json.dumps(args, default=str)[:120]}", file=sys.stderr)
     value = fn()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path + ".tmp", "w") as f:
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"  # unique per writer: parallel misses of one key
+    with open(tmp, "w") as f:
         json.dump({"name": name, "args": args, "at": time.time(), "value": value}, f, default=str)
-    os.replace(path + ".tmp", path)
+    os.replace(tmp, path)
     return value
 
 

@@ -21,7 +21,7 @@ form {"by_marker": {"marker text": answer, ...}, "default": answer} picks the fi
 Purposes in use: intake, round, says_it, disconfirm_plan, disconfirm, judge (+ judge_all, judge_external,
 judge_devil), baseline, match, extra, classify.
 """
-import contextlib, fcntl, itertools, json, os, re, subprocess, sys, tempfile, threading, time
+import contextlib, fcntl, itertools, json, os, re, signal, subprocess, sys, tempfile, threading, time
 
 import cache
 
@@ -104,6 +104,26 @@ def _log(path, line):
         pass
 
 
+def hard_left():
+    """Seconds left before MODEL_HARD_STOP (a time.time() value set by app/run.py from the wall cap), or None."""
+    hs = os.environ.get("MODEL_HARD_STOP")
+    try:
+        return float(hs) - time.time() if hs else None
+    except ValueError:
+        return None
+
+
+class HardStop(ModelError):
+    pass
+
+
+def _check_stop(what):
+    left = hard_left()
+    if left is not None and left <= 5:
+        raise HardStop(f"{what}: hard stop (wall cap) reached")
+    return left
+
+
 @contextlib.contextmanager
 def _global_slot():
     """Hold one of MODEL_GLOBAL_CONC file-lock slots (shared by all processes); wait while all are taken."""
@@ -124,6 +144,7 @@ def _global_slot():
                 fcntl.flock(f, fcntl.LOCK_UN)
                 f.close()
             return
+        _check_stop("model slot wait")
         time.sleep(0.3)
 
 
@@ -133,13 +154,29 @@ def _pi(system, user, purpose, account):
            "--thinking", _thinking(purpose)]
     env = dict(os.environ, PI_CLAUDE_TETHER_ACCOUNT=account)
     t0 = time.time()
-    with _semaphore(), _global_slot():
-        try:
-            p = subprocess.run(cmd, input=user, capture_output=True, text=True, env=env, cwd=tempfile.gettempdir(),
-                               timeout=float(os.environ.get("MODEL_TIMEOUT", 900)))
-            rc, out, err = p.returncode, p.stdout, p.stderr
-        except subprocess.TimeoutExpired:
-            rc, out, err = -9, "", "timeout"
+    left = _check_stop(purpose)
+    sem = _semaphore()
+    if not sem.acquire(timeout=left if left is not None else None):
+        raise HardStop(f"{purpose}: hard stop while waiting for a model slot")
+    try:
+        with _global_slot():
+            timeout = float(os.environ.get("MODEL_TIMEOUT", 900))
+            left = _check_stop(purpose)
+            if left is not None:
+                timeout = max(5.0, min(timeout, left))
+            p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 env=env, cwd=tempfile.gettempdir(), start_new_session=True)
+            try:
+                out, err = p.communicate(user, timeout=timeout)
+                rc = p.returncode
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    os.killpg(p.pid, signal.SIGKILL)   # pi and its transport child, so the slot really frees
+                with contextlib.suppress(Exception):
+                    p.communicate(timeout=10)
+                rc, out, err = -9, "", f"timeout after {timeout:.0f} s"
+    finally:
+        sem.release()
     secs = round(time.time() - t0, 1)
     _log("runs/model_calls.jsonl", {"at": time.strftime("%H:%M:%S"), "purpose": purpose, "account": account,
                                     "thinking": _thinking(purpose),
@@ -160,6 +197,8 @@ def _text(system, user, purpose):
             return {"text": out, "account": acc}
         msg = (err or out or "empty answer").strip()[-300:]
         errors.append(f"{acc} rc={rc} {msg}")
+        if rc == -9:
+            break  # a timeout is not an account problem: a second try would only double the wait
         if LIMIT_RE.search(msg):
             _log("runs/alerts.log", f"{time.strftime('%Y-%m-%dT%H:%M:%S')} model {purpose} account {acc} limit: {msg[:200]}")
             print(f"model: {acc} limit, trying the next account", file=sys.stderr)
